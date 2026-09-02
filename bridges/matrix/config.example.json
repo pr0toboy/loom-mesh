@@ -1,0 +1,20 @@
+{
+  "homeserver": "https://matrix.your-tailnet.ts.net",
+  "bot_token": "REPLACE_WITH_BOT_ACCESS_TOKEN",
+  "bot_user": "@mesh-bot:matrix.your-tailnet.ts.net",
+  "pilot_user": "@you:matrix.your-tailnet.ts.net",
+
+  "mesh_peer": "pilot-matrix",
+  "mesh_send": "/home/you/mesh/send.py",
+  "inbox": "/home/you/mesh/inbox-pilot-matrix.jsonl",
+  "state_file": "/home/you/matrix/bridge/state.json",
+  "default_priority": "normal",
+
+  "agent_tokens_file": "/home/you/matrix/bridge/agent_tokens.json",
+
+  "rooms": {
+    "agent-1": "!ROOM_ID_FOR_AGENT_1:matrix.your-tailnet.ts.net",
+    "agent-2": "!ROOM_ID_FOR_AGENT_2:matrix.your-tailnet.ts.net",
+    "supervisor": "!ROOM_ID_FOR_SUPERVISOR:matrix.your-tailnet.ts.net"
+  }
+}

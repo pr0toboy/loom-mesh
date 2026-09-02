@@ -1,0 +1,18 @@
+[Unit]
+Description=LoomMesh Matrix bridge — chat facade on the mesh bus
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=BRIDGE_CONFIG=%h/matrix/bridge/config.json
+ExecStart=/usr/bin/python3 %h/loom-mesh/bridges/matrix/bridge.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=append:%h/matrix/bridge/bridge.log
+StandardError=append:%h/matrix/bridge/bridge.log
+
+[Install]
+WantedBy=default.target

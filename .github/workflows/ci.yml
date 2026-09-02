@@ -1,0 +1,67 @@
+name: ci
+
+# Two jobs, and the second one is the point of this file. Tests catch code that
+# stopped working; the guard catches the deployment leaking back into the
+# repository. That has happened for real — an rsync brought in 27 backup files
+# named after the operator's own agents — and it is the kind of mistake that is
+# invisible in a diff review because nothing about it looks wrong.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r mesh-api/requirements.txt
+          pip install pytest
+      - name: Install tmux and inotify-tools
+        # The bus and hook tests drive a real tmux pane. Without it they skip,
+        # and the two defects they exist to catch — a capture that reads an
+        # empty pane, an agent reading someone else's inbox — go unnoticed.
+        run: sudo apt-get update && sudo apt-get install -y tmux inotify-tools
+      - name: Install a stub `claude` on PATH
+        # bootstrap.sh refuses to run without the Claude Code CLI, and a runner
+        # has no way to install an authenticated one. Without this the eight
+        # bootstrap end-to-end tests fail here while passing on any developer
+        # machine that happens to have `claude` installed — a green local suite
+        # and a red CI, for a reason that has nothing to do with the code.
+        # docker/Dockerfile ships the same stub for the same reason; the tests
+        # only ever need `command -v claude` to succeed.
+        run: |
+          printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "claude-stub 0.0.0 (ci)"; exit 0; fi\necho "claude stub: not a real CLI" >&2\nexit 1\n' | sudo tee /usr/local/bin/claude >/dev/null
+          sudo chmod +x /usr/local/bin/claude
+          claude --version
+      - name: Run the test suite
+        run: python -m pytest -q
+
+  no-personal-data:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the guard also reads the committed tree
+      - name: Scan for personal data
+        run: |
+          set +e
+          bash tools/check-no-personal-data.sh --git
+          rc=$?
+          set -e
+          case "$rc" in
+            0) echo "clean" ;;
+            2) echo "::warning::Partial scan: the local pattern file is not in CI, "\
+                    "so agent and machine NAMES were not checked — only paths, IPs "\
+                    "and e-mails. Run the guard locally before publishing." ;;
+            *) echo "::error::Personal data found — see the output above."; exit 1 ;;
+          esac

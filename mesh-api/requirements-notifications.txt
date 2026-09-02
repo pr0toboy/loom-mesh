@@ -1,0 +1,6 @@
+# Optional: mobile push notifications through Firebase Cloud Messaging.
+# Install only if you actually push to a phone — it is a large dependency tree
+# for a feature most deployments do not use, and the API degrades cleanly
+# without it (push disabled, everything else unchanged).
+-r requirements.txt
+firebase-admin==7.4.0

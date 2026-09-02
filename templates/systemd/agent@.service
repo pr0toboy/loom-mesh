@@ -1,0 +1,31 @@
+[Unit]
+Description={{agent.name}} — Claude Code persistent agent in tmux
+# Depend on the shared tmux server: it is guaranteed up before this agent runs
+# (so no boot-time new-session race), and the server lives in tmux-server.service's
+# cgroup rather than this agent's — so restarting this agent never kills it.
+After=network-online.target tmux-server.service
+Wants=network-online.target tmux-server.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# process (not the default control-group): a restart/stop of this agent must only
+# affect its own session (handled by ExecStop) and never reach into the shared
+# tmux server. See tmux-server.service for the other half of this contract.
+KillMode=process
+WorkingDirectory={{agent.workdir}}
+# PATH includes /mnt/c/* so agents running inside WSL2 can invoke Windows
+# binaries (cmd.exe, powershell.exe, pwsh.exe) without absolute paths. The
+# default systemd-user PATH strips them, which breaks WSL interop even when
+# WSL_INTEROP and binfmt_misc are healthy. On native Linux these entries
+# are silently ignored (Bash skips non-existent PATH dirs).
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/mnt/c/WINDOWS/system32:/mnt/c/WINDOWS:/mnt/c/WINDOWS/System32/Wbem:/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/:/mnt/c/Program Files/PowerShell/7/"
+Environment=MESH_AGENT={{agent.name}}
+EnvironmentFile=-%h/.config/systemd/user/mesh.env
+ExecStart=/usr/bin/tmux new-session -d -s {{agent.name}} -c {{agent.workdir}} \
+    "while true; do %h/.local/bin/claude --permission-mode bypassPermissions \
+    --model {{agent.model}}; sleep 2; done"
+ExecStop=/usr/bin/tmux kill-session -t {{agent.name}}
+
+[Install]
+WantedBy=default.target

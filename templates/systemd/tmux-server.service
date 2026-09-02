@@ -1,0 +1,26 @@
+[Unit]
+# Owns the shared (default-socket) tmux server in ITS OWN cgroup. Every agent
+# attaches its session to this one server, so the server must outlive any single
+# agent. Because the server lives here — not in whichever agent happened to start
+# it first — `systemctl --user restart <agent>` can no longer tear it down, and
+# starting it before any agent also removes the old boot-time new-session race.
+Description=Loom Mesh shared tmux server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Keepalive session so the server always has >=1 session, plus exit-empty off as a
+# belt-and-suspenders guard, so the server never self-exits when agents come and go.
+ExecStart=/usr/bin/tmux new-session -d -s mesh-keepalive /bin/sh -c "exec sleep infinity"
+ExecStartPost=/usr/bin/tmux set-option -s exit-empty off
+ExecStop=/usr/bin/tmux kill-server
+# Default KillMode (control-group) is intentional and correct here: stopping THIS
+# unit should bring the whole tmux server (and every agent session on it) down.
+# The protection against a single-agent restart killing the server lives on the
+# agent@ units via KillMode=process, not here.
+
+[Install]
+WantedBy=default.target

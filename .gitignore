@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+*.egg-info/
+.venv/
+dist/
+build/
+*.egg
+
+# Mesh runtime — never commit (operator config, tokens, agent state, inboxes)
+mesh.toml
+local.mesh.toml
+*.local.toml
+api-tokens.json
+*-tokens.json
+*-service-account*.json
+inbox-*.jsonl
+state-*.json
+heartbeats/
+tickets/
+
+# WebUI display layer — owner identity, kept out of the public pattern repo
+dashboard-web/registry.json
+dashboard-web/avatars/
+dashboard-web/office/sprites/
+
+# Matrix bridge — never commit real config/tokens (only the .example.json templates)
+bridges/matrix/config.json
+bridges/matrix/agent_tokens.json
+bridges/matrix/state.json
+
+# Logs
+*.log
+logs/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Patterns for the personal-data guard: specific to the local installation.
+# Versioning them would publish the very roster the guard exists to protect.
+tools/.personal-data-patterns

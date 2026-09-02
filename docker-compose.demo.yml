@@ -1,0 +1,107 @@
+## LoomMesh demo playground
+##
+## Spins up three containers sharing a named mesh volume (see the note on
+## `volumes:` below for why it is not a tmpfs one):
+##   - watcher : inotify on /mesh/, signals recipient on inbox modify
+##   - alice   : fake agent, opens conversation with "ping #1"
+##   - bob     : fake agent, replies "pong"
+##
+## They exchange 3 round-trips then exit clean. Total run ~10s.
+##
+## Run:
+##   docker compose -f docker-compose.demo.yml up --build --exit-code-from alice
+##
+## The `--exit-code-from alice` flag tears down the watcher and bob
+## cleanly when alice finishes its 3 rounds (~5s total).
+##
+## What it demonstrates:
+##   - filesystem-first bus: each agent has its own inbox-<name>.jsonl
+##   - push-not-poll: the watcher pushes a wake signal via FIFO
+##     within ~1s of a new message hitting disk
+##   - acked flag: agents flip `acked: true` once they have processed a msg
+##
+## What it does NOT demonstrate:
+##   - Claude Code itself (these agents are 40 lines of bash)
+##   - the FastAPI mesh-api and bearer-token auth
+##   - tmux send-keys (the docker FIFO stands in for it)
+##   - cross-host SSH push, ticket dispatcher, the webui, the Matrix bridge
+
+services:
+  mesh-init:
+    image: alpine:3.20
+    command: >
+      sh -c "
+        cd /mesh &&
+        : > inbox-alice.jsonl &&
+        : > inbox-bob.jsonl &&
+        mkfifo -m 0666 trigger-alice 2>/dev/null || true &&
+        mkfifo -m 0666 trigger-bob 2>/dev/null || true &&
+        chmod 0666 inbox-*.jsonl &&
+        chmod 0777 /mesh &&
+        echo 'mesh ready' &&
+        ls -la /mesh
+      "
+    volumes:
+      - mesh:/mesh
+
+  watcher:
+    build:
+      # Root context: the image copies the real bus out of bus/.
+      context: .
+      dockerfile: docker/demo/Dockerfile
+    image: loom-mesh-demo
+    depends_on:
+      mesh-init:
+        condition: service_completed_successfully
+    environment:
+      MESH_HOME: /mesh
+    volumes:
+      - mesh:/mesh
+    command: bash /opt/loom-demo/watcher.sh
+
+  alice:
+    image: loom-mesh-demo
+    depends_on:
+      mesh-init:
+        condition: service_completed_successfully
+      watcher:
+        condition: service_started
+    environment:
+      MESH_HOME: /mesh
+      MESH_AGENT: alice
+      MESH_PARTNER: bob
+      MESH_PEERS: "alice,bob"
+      MAX_PINGS: "3"
+    volumes:
+      - mesh:/mesh
+    command: bash /opt/loom-demo/fake-agent.sh
+
+  bob:
+    image: loom-mesh-demo
+    depends_on:
+      mesh-init:
+        condition: service_completed_successfully
+      watcher:
+        condition: service_started
+    environment:
+      MESH_HOME: /mesh
+      MESH_AGENT: bob
+      MESH_PARTNER: alice
+      MESH_PEERS: "alice,bob"
+      MAX_PINGS: "3"
+    volumes:
+      - mesh:/mesh
+    command: bash /opt/loom-demo/fake-agent.sh
+
+volumes:
+  # An ordinary named volume, deliberately NOT a tmpfs one.
+  #
+  # A `type: tmpfs` local volume is not shared: each container gets its own, and
+  # it is released when the last container using it exits. `mesh-init` therefore
+  # prepared a filesystem that vanished when it completed, and the agents came up
+  # on an empty one. The demo appeared to work only because the fake agents
+  # recreate their own inbox and FIFO — so the init container was, in effect,
+  # decorative, and anything it wrote (a roster, for instance) was lost.
+  #
+  # Clean it between runs with: docker compose -f docker-compose.demo.yml down -v
+  mesh:

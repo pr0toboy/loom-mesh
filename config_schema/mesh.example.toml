@@ -1,0 +1,82 @@
+# mesh.example.toml — configuration example for a 2-host, 5-agent mesh.
+#
+# Copy this file to mesh.toml, adapt paths, agent names, and hosts.
+# Run `python3 validate.py mesh.toml` to check your config before bootstrapping.
+#
+# Variables interpolated at load time:
+#   $HOME     → os.path.expanduser("~")
+#   $USER     → os.environ["USER"]
+#   Any $VAR  → os.environ.get("VAR", "$VAR")  (left as-is if not set)
+
+# ── Global mesh settings ────────────────────────────────────────────────────────
+
+[mesh]
+home    = "~/mesh"          # bus directory (inboxes, state, tickets, heartbeats)
+api_port  = 8765            # mesh-api FastAPI port (1024-65535)
+api_bind  = "127.0.0.1"    # loopback only: nothing off this machine can reach it.
+                           # To reach it from another device, bind to that device's
+                           # network (e.g. your VPN interface address) and decide
+                           # deliberately what may connect — see docs/operations.md.
+log_dir   = "~/mesh/logs"  # log directory
+
+# ── Hosts ───────────────────────────────────────────────────────────────────────
+# "primary" is the always-on box where the bus lives.
+# Additional hosts are remote workstations; agents there are pushed via SSH.
+
+[hosts.primary]
+user    = "$USER"           # interpolated at load time
+host    = "localhost"       # or "100.x.y.z" (Tailscale IP)
+# ssh_key omitted = use default SSH key (~/.ssh/id_*)
+
+[[hosts.remote]]
+name       = "workstation"
+user       = "alice"
+host       = "100.100.100.100"  # Tailscale IP
+ssh_key    = "~/.ssh/id_ed25519"
+wsl_distro = "Ubuntu"      # null for native Linux; "Ubuntu" for WSL2
+
+# ── Agents ──────────────────────────────────────────────────────────────────────
+# Each agent runs in its own tmux session in workdir.
+# `host` must match `hosts.primary` or one of `hosts.remote[*].name`.
+
+[[agents]]
+name             = "curator"
+role             = "Knowledge base curator — manages the Obsidian vault"
+model            = "claude-opus-4-7"
+workdir          = "~/curator"
+charter_template = "curator"   # maps to templates/charter/curator.md
+host             = "primary"
+session_type     = "tmux"
+
+[[agents]]
+name             = "builder"
+role             = "Main developer — implements features across the codebase"
+model            = "claude-sonnet-4-6"
+workdir          = "~/builder"
+charter_template = "worker"
+host             = "primary"
+
+[[agents]]
+name             = "handy"
+role             = "Pi housekeeping — logs, monitoring, scheduled tasks"
+model            = "claude-sonnet-4-6"
+workdir          = "~/handy"
+charter_template = "worker"
+host             = "primary"
+
+[[agents]]
+name             = "remote-dev"
+role             = "Secondary developer on workstation — GPU-heavy builds"
+model            = "claude-opus-4-7"
+workdir          = "~/remote-dev"
+charter_template = "worker"
+host             = "workstation"   # must match hosts.remote[*].name
+wsl_distro       = "Ubuntu"        # overrides host-level if set
+
+[[agents]]
+name             = "supervisor"
+role             = "Supervisor — health checks, alerts, auto-compact"
+model            = "claude-haiku-4-5-20251001"
+workdir          = "~/supervisor"
+charter_template = "supervisor"
+host             = "primary"

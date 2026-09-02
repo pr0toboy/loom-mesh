@@ -1,0 +1,16 @@
+# Pinned, not floating. A range means two installs of the same commit can
+# behave differently, and the one that breaks is always the one you did not run.
+# Bump deliberately, with the suite green.
+fastapi==0.135.2
+uvicorn[standard]==0.42.0
+pydantic==2.12.5
+watchfiles==1.1.1
+python-multipart==0.0.20
+aiofiles==24.1.0
+
+# Test-only. TestClient needs it; the service does not.
+httpx==0.28.1
+
+# Push notifications are OPTIONAL: see requirements-notifications.txt. The code
+# imports firebase-admin lazily and disables push when it is missing, so the API
+# runs without it — and most deployments never send a push at all.

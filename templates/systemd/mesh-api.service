@@ -1,0 +1,59 @@
+[Unit]
+Description=Mesh API (FastAPI) — backend serving the webui at /ui/ and the REST API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={{mesh_api_base}}
+EnvironmentFile=-%h/.config/systemd/user/mesh.env
+# The deployment DECLARES its mesh home and its tmux server, rather than letting
+# each process infer them.
+#
+# MESH_HOME: without it, a service started by systemd falls back to ~/mesh even
+# when the install put the mesh somewhere else — it would read and write the
+# wrong bus.
+#
+# MESH_TMUX: the writers (watcher, dispatcher) refuse to drive the DEFAULT tmux
+# server unless the deployment says so, because a test bench run from a clone
+# would otherwise type into live agent panes — `push_local` ends with Enter, so
+# a session merely NAMED like a peer executes the notice. Declaring it here is
+# what separates an installed mesh from a bench: bootstrap.sh writes this line,
+# a clone run by hand has nothing. `tmux` means the shared default server, which
+# is where agent@ and tmux-server put the sessions. Point it at a private socket
+# (`tmux -L <name>`) ONLY if the agent units use that socket too — otherwise the
+# services look healthy and deliver into an empty server.
+Environment=MESH_HOME={{mesh.home}}
+Environment=MESH_TMUX={{mesh.tmux}}
+# MESH_ALLOW_SHARED_TMUX: this unit was written by bootstrap.sh, so it IS the
+# installation — it may drive the shared tmux server even when the mesh home is
+# not the default one. A clone run by hand carries no such line and is refused
+# rather than allowed to type into whatever sessions the shared server holds.
+Environment=MESH_ALLOW_SHARED_TMUX=1
+Environment=PATH={{mesh_api_base}}/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONPATH={{mesh_api_base}}
+# The service tells the app where it listens, so the app can refuse the one
+# unsafe combination it cannot otherwise see: no auth on a reachable address.
+Environment=MESH_API_BIND={{mesh.api_bind}}
+ExecStart={{mesh_api_uvicorn}} mesh_api.main:app --host {{mesh.api_bind}} --port {{mesh.api_port}}
+Restart=on-failure
+RestartSec=3
+# Hardening, and the two options that are NOT here.
+#
+# `PrivateTmp=true` gives the unit its own /tmp — which hides the tmux socket in
+# /tmp/tmux-<uid>/. A watcher that cannot see tmux pushes nothing, an API that
+# cannot see it reports every agent as down. `ProtectHome=read-only` makes the
+# whole of ~ unwritable, and the mesh home (inboxes, tickets, logs) lives under
+# it: the service then starts, logs "Read-only file system", and delivers
+# nothing. Both were shipped here and neither had ever been run — proven cutting
+# by an A/B test on a real unit before removal.
+#
+# What is kept: the filesystem is read-only everywhere *except* the two paths
+# this service must write, which is the stronger guarantee of the two.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths={{mesh.home}} {{mesh.log_dir}}
+RestrictNamespaces=true
+
+[Install]
+WantedBy=default.target

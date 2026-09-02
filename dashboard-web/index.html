@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LoomMesh</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 108 108'%3E%3Cg stroke='%237AD7C5' stroke-width='3' stroke-linecap='round'%3E%3Cline x1='54' y1='54' x2='54' y2='28.08'/%3E%3Cline x1='54' y1='54' x2='76.447' y2='41.04'/%3E%3Cline x1='54' y1='54' x2='76.447' y2='66.96'/%3E%3Cline x1='54' y1='54' x2='54' y2='79.92'/%3E%3Cline x1='54' y1='54' x2='31.553' y2='66.96'/%3E%3Cline x1='54' y1='54' x2='31.553' y2='41.04'/%3E%3C/g%3E%3Cg fill='%237AD7C5'%3E%3Ccircle cx='54' cy='54' r='8.64'/%3E%3Ccircle cx='54' cy='28.08' r='5.76'/%3E%3Ccircle cx='76.447' cy='41.04' r='5.76'/%3E%3Ccircle cx='76.447' cy='66.96' r='5.76'/%3E%3Ccircle cx='54' cy='79.92' r='5.76'/%3E%3Ccircle cx='31.553' cy='66.96' r='5.76'/%3E%3Ccircle cx='31.553' cy='41.04' r='5.76'/%3E%3C/g%3E%3C/svg%3E">
+<script src="d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:      #0d1117;
+    --surface: #161b22;
+    --border:  #21262d;
+    --text:    #e6edf3;
+    --muted:   #7d8590;
+    --green:   #3fb950;
+    --orange:  #d29922;
+    --red:     #f85149;
+    --grey:    #484f58;
+    --radius:  10px;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+    padding: 20px 24px;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 28px;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+  }
+  .logo-icon {
+    width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .logo-icon svg { width: 100%; height: 100%; display: block; }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .live-pill {
+    display: flex; align-items: center; gap: 5px;
+    background: #1c2d1c;
+    border: 1px solid #2d4a2d;
+    border-radius: 20px;
+    padding: 3px 10px;
+    font-size: 11px;
+    color: var(--green);
+  }
+  .live-dot {
+    width: 6px; height: 6px;
+    background: var(--green);
+    border-radius: 50%;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  .ws-badge {
+    font-size: 10px; padding: 2px 8px;
+    border-radius: 10px; border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .ws-badge.ok  { color: var(--green);  border-color: #2d4a2d; background: #1c2d1c; }
+  .ws-badge.err { color: var(--orange); border-color: #3d2d0d; background: #2d1c0d; }
+
+  #last-ts { font-size: 11px; color: var(--muted); }
+
+  /* ── Section titles ── */
+  .section-title {
+    font-size: 11px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 14px;
+  }
+  .section-title .hint {
+    font-weight: 400; letter-spacing: 0; text-transform: none;
+    color: var(--grey); font-size: 10px;
+  }
+
+  /* ── Agent cards ── */
+  #agents-section { margin-bottom: 28px; }
+  #agents-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 12px;
+  }
+  .agent-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 14px 14px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    cursor: default;
+  }
+  .agent-card:hover {
+    border-color: var(--ac);
+    box-shadow: 0 0 0 1px var(--ac), 0 4px 16px rgba(0,0,0,0.35);
+  }
+  .agent-card::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: var(--ac, var(--border));
+  }
+  .card-top {
+    display: flex; align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .monogram {
+    width: 38px; height: 38px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 19px; font-weight: 700; color: #fff;
+    overflow: hidden;
+  }
+  .monogram .avatar {
+    width: 100%; height: 100%; border-radius: 50%;
+    object-fit: cover; display: block;
+  }
+  .status-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+  }
+  .status-dot.idle { background: var(--green); box-shadow: 0 0 5px var(--green); }
+  .status-dot.busy { background: var(--orange); box-shadow: 0 0 5px var(--orange); animation: pulse 1.5s infinite; }
+  .status-dot.down { background: var(--red); box-shadow: 0 0 6px var(--red); }
+  .agent-card.is-down { border-color: #5c2626; }
+  .agent-card.is-down .agent-meta { color: var(--red); }
+
+  .agent-name { font-weight: 600; font-size: 13px; margin-bottom: 3px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .agent-meta { font-size: 11px; color: var(--muted); line-height: 1.5; }
+  .tickets-row { display: flex; gap: 5px; margin-top: 9px; flex-wrap: wrap; }
+  .badge {
+    font-size: 10px; font-weight: 600; padding: 2px 7px;
+    border-radius: 10px; border: 1px solid var(--border); color: var(--muted);
+  }
+  .badge.running { color: var(--orange); border-color: #3d2d0d; background: rgba(210,153,34,0.12); }
+  .badge.pending { color: #58a6ff; border-color: #1d3557; background: rgba(88,166,255,0.10); }
+
+  /* ── Graph ── */
+  #graph-section { margin-bottom: 28px; }
+  #graph-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden; position: relative;
+  }
+  #graph-svg { width: 100%; display: block; }
+  .node-label {
+    font-size: 11px; fill: #c9d1d9;
+    text-anchor: middle; pointer-events: none;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+  }
+  .edge-lbl {
+    font-size: 9px; fill: var(--muted);
+    text-anchor: middle; pointer-events: none;
+  }
+  #graph-ts { position: absolute; bottom: 8px; right: 12px; font-size: 10px; color: var(--muted); }
+
+  /* ── Gauges, reused across the host cards ── */
+  .gauge { display: flex; flex-direction: column; gap: 6px; }
+  .gauge-hdr { display: flex; justify-content: space-between; font-size: 12px; }
+  .gauge-lbl { color: var(--muted); }
+  .gauge-val { font-weight: 600; }
+  .gauge-track { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .gauge-fill { height: 100%; border-radius: 2px; transition: width 0.6s ease; }
+  .gauge-fill.green  { background: var(--green); }
+  .gauge-fill.orange { background: var(--orange); }
+  .gauge-fill.red    { background: #f85149; }
+
+  /* ── Hosts (machines) ── */
+  #hosts-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 12px;
+  }
+  .host-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .host-hdr { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .host-name { font-weight: 600; font-size: 13px; }
+  .host-state {
+    font-size: 10px; font-weight: 600; padding: 2px 9px;
+    border-radius: 10px; border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .host-state.online      { color: var(--green);  border-color: #2d4a2d; background: #1c2d1c; }
+  .host-state.intentional { color: var(--orange); border-color: #3d2d0d; background: #2d1c0d; }
+  .host-state.offline     { color: var(--muted);  border-color: var(--border); }
+  .host-line { font-size: 12px; color: var(--text); line-height: 1.4; }
+  .host-line.muted { color: var(--muted); }
+
+  footer { margin-top: 24px; text-align: center; font-size: 11px; color: var(--grey); }
+
+  #err {
+    display: none; background: #2d1c0d;
+    border: 1px solid #5d3a00; border-radius: 6px;
+    padding: 8px 14px; color: var(--orange); margin-bottom: 16px; font-size: 12px;
+  }
+
+  #graph-svg { touch-action: pan-y; }
+
+  /* ── Mobile ── */
+  @media (max-width: 600px) {
+    body { padding: 14px 12px; }
+    header { margin-bottom: 20px; flex-wrap: wrap; gap: 8px 12px; }
+    .logo { font-size: 18px; }
+    .logo-icon { width: 28px; height: 28px; font-size: 15px; }
+    .header-right { gap: 8px; }
+    section, #agents-section, #graph-section { margin-bottom: 20px; }
+    #agents-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .agent-card { padding: 13px 12px 12px; }
+    .monogram { width: 34px; height: 34px; font-size: 12px; }
+    .agent-name { font-size: 12px; }
+    #hosts-grid { grid-template-columns: 1fr; gap: 10px; }
+    footer { margin-top: 18px; }
+  }
+  @media (max-width: 360px) {
+    #agents-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">
+      <!-- LoomMesh logo (matches the Android app launcher icon) -->
+      <svg viewBox="0 0 108 108" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="LoomMesh">
+        <g stroke="#7AD7C5" stroke-width="2.4" stroke-linecap="round">
+          <line x1="54" y1="54" x2="54" y2="28.08"/>
+          <line x1="54" y1="54" x2="76.447" y2="41.04"/>
+          <line x1="54" y1="54" x2="76.447" y2="66.96"/>
+          <line x1="54" y1="54" x2="54" y2="79.92"/>
+          <line x1="54" y1="54" x2="31.553" y2="66.96"/>
+          <line x1="54" y1="54" x2="31.553" y2="41.04"/>
+        </g>
+        <g fill="#7AD7C5">
+          <circle cx="54" cy="54" r="8.64"/>
+          <circle cx="54" cy="28.08" r="5.76"/>
+          <circle cx="76.447" cy="41.04" r="5.76"/>
+          <circle cx="76.447" cy="66.96" r="5.76"/>
+          <circle cx="54" cy="79.92" r="5.76"/>
+          <circle cx="31.553" cy="66.96" r="5.76"/>
+          <circle cx="31.553" cy="41.04" r="5.76"/>
+        </g>
+      </svg>
+    </div>
+    LoomMesh
+  </div>
+  <div class="header-right">
+    <span id="ws-status" class="ws-badge">WS…</span>
+    <span id="last-ts"></span>
+    <div class="live-pill"><div class="live-dot"></div>live</div>
+  </div>
+</header>
+
+<div id="err"></div>
+
+<section id="agents-section">
+  <div class="section-title">Agents</div>
+  <div id="agents-grid"></div>
+</section>
+
+<section id="graph-section">
+  <div class="section-title">Mesh graph <span class="hint">— numbers are messages exchanged over the last hour; link thickness follows them</span></div>
+  <div id="graph-wrap">
+    <svg id="graph-svg" viewBox="0 0 800 340" preserveAspectRatio="xMidYMid meet"></svg>
+    <div id="graph-ts"></div>
+  </div>
+</section>
+
+<section id="hosts-section">
+  <div class="section-title">Machines</div>
+  <div id="hosts-grid"></div>
+</section>
+
+<footer>LoomMesh · read-only dashboard</footer>
+
+<script>
+// The token is asked for once and kept in this browser's localStorage.
+//
+// It used to be read from a `config.js` sitting next to this page — and /ui is
+// served as static files with no authentication, so anyone who could reach the
+// port could fetch that file and read a token that grants full API access. The
+// page is the wrong place to store a credential: what serves the page cannot
+// authenticate the reader.
+//
+// `apiBase` is empty when the dashboard is served by mesh-api itself (the usual
+// case). Set MESH_DASHBOARD_API in localStorage to point it elsewhere.
+const API = localStorage.getItem('loom.apiBase') || '';
+
+function askToken() {
+  const entered = window.prompt(
+    'mesh-api bearer token\n\n' +
+    'Taken from your api-tokens.json. Stored in this browser only ' +
+    '(localStorage), never sent anywhere but this API.');
+  if (entered) localStorage.setItem('loom.token', entered.trim());
+  return entered ? entered.trim() : '';
+}
+
+let TOKEN = localStorage.getItem('loom.token') || askToken();
+const HDR = { 'Authorization': 'Bearer ' + TOKEN };
+
+// A rejected token is a dead page otherwise: clear it and ask again.
+window.addEventListener('loom:unauthorized', () => {
+  localStorage.removeItem('loom.token');
+  TOKEN = askToken();
+  location.reload();
+});
+
+// Node colours, populated from /graph
+const COLORS = {};
+const FALLBACK = '#555e6c';
+
+// Escape every value coming from the server (/status, /graph) before it reaches HTML.
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+// Validate a colour (#hex) before it goes into a style attribute; fall back otherwise.
+function safeColor(c) { return /^#[0-9a-f]{3,8}$/i.test(c || '') ? c : FALLBACK; }
+
+// ── Per-agent display mapping ─────────────────────────────────────────────
+// Adapt these tables to YOUR own agent ids, as returned by /status and /graph.
+// All of it is optional: with no entry, the dashboard falls back to a monogram
+// (the first letter) and a default colour.
+
+// Optional two-letter monogram (fallback: the first letter of the id).
+const MONOS = {
+  // 'agent-mobile':'AM', 'operator':'OP'
+};
+function mono(id) { return MONOS[id] || id.charAt(0).toUpperCase(); }
+
+// Ids that have a PNG avatar at avatars/<id>.png — put your own there.
+const AVATARS = new Set([/* 'agent-1', 'agent-2', ... */]);
+function avatarUrl(id) { return AVATARS.has(id) ? 'avatars/'+id+'.png' : null; }
+
+// Optional emoji icon per agent, used when there is no PNG avatar.
+const ICONS = {
+  // 'agent-1':'🧠', 'agent-2':'💠', 'operator':'🧑'
+};
+function icon(id) { return ICONS[id] || mono(id); }
+
+function agentColor(id) { return COLORS[id] || FALLBACK; }
+
+function timeAgo(iso) {
+  if (!iso) return null;
+  const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (s < 60)    return 'just now';
+  if (s < 3600)  return Math.floor(s/60) + 'min ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+}
+
+// ── Agents ────────────────────────────────────────────────────────────────
+// Optional display order; ids not listed here are appended after these.
+const AGENT_ORDER = [/* 'agent-1', 'agent-2', ... */];
+
+function renderAgents(data) {
+  const grid = document.getElementById('agents-grid');
+  const entries = Object.entries(data.agents);
+  entries.sort(([a],[b]) => {
+    const ia = AGENT_ORDER.indexOf(a), ib = AGENT_ORDER.indexOf(b);
+    if (ia < 0 && ib < 0) return a.localeCompare(b);
+    if (ia < 0) return 1; if (ib < 0) return -1;
+    return ia - ib;
+  });
+
+  grid.innerHTML = '';
+  for (const [id, ag] of entries) {
+    const color = agentColor(id);
+    const busy  = ag.alive && (ag.tickets_running > 0 || !ag.idle);
+    const sc    = !ag.alive ? 'down' : busy ? 'busy' : 'idle';
+    const stxt  = !ag.alive ? 'offline' : busy ? 'busy' : 'online';
+    const ago   = timeAgo(ag.last_activity);
+
+    let badges = '';
+    if (ag.tickets_running > 0)
+      badges += `<span class="badge running">▶ ${ag.tickets_running} running</span>`;
+    if (ag.tickets_pending > 0)
+      badges += `<span class="badge pending">⏳ ${ag.tickets_pending} pending</span>`;
+
+    const safeAc = safeColor(color);
+    const card = document.createElement('div');
+    card.className = 'agent-card' + (ag.alive ? '' : ' is-down');
+    card.style.cssText = `--ac:${safeAc}`;
+    card.innerHTML = `
+      <div class="card-top">
+        <div class="monogram" style="background:${safeAc}">${
+          avatarUrl(id)
+            ? `<img class="avatar" src="${esc(avatarUrl(id))}" alt="${esc(id)}" loading="lazy">`
+            : esc(icon(id))
+        }</div>
+        <div class="status-dot ${sc}" title="${stxt}"></div>
+      </div>
+      <div class="agent-name">${esc(id)}</div>
+      <div class="agent-meta">${stxt}${ago ? ' · '+ago : ''}</div>
+      ${badges ? `<div class="tickets-row">${badges}</div>` : ''}
+    `;
+    grid.appendChild(card);
+  }
+}
+
+// ── Hosts (machines) ──────────────────────────────────────────────────────
+function gaugeColor(pct) {
+  return pct > 85 ? 'red' : pct > 65 ? 'orange' : 'green';
+}
+function gaugeHTML(icon, label, val, unit, pct, color) {
+  return `<div class="gauge">
+    <div class="gauge-hdr">
+      <span class="gauge-lbl">${icon} ${label}</span>
+      <span class="gauge-val">${val}${unit}</span>
+    </div>
+    <div class="gauge-track">
+      <div class="gauge-fill ${color || gaugeColor(pct)}" style="width:${Math.min(100,Math.max(0,pct))}%"></div>
+    </div>
+  </div>`;
+}
+
+function stateLabel(s) {
+  return s==='online' ? 'online'
+       : s==='offline_intentional' ? 'off'
+       : s==='offline' ? 'offline' : '?';
+}
+function stateClass(s) {
+  return s==='online' ? 'online'
+       : s==='offline_intentional' ? 'intentional' : 'offline';
+}
+
+function hostBody(k, h) {
+  if (k === 'primary') {
+    const tc = h.cpu_temp_c>75?'red':h.cpu_temp_c>60?'orange':'green';
+    return gaugeHTML('🌡','CPU', h.cpu_temp_c, '°C', (h.cpu_temp_c/85)*100, tc)
+      + gaugeHTML('💾','Disk', h.disk_used_pct, '%', h.disk_used_pct)
+      + gaugeHTML('⏱','Uptime', Math.floor(h.uptime_h), 'h', (h.uptime_h/720)*100, 'green')
+      // Cores come from the host, not from the machine this page was written on:
+      // the divisor was hardcoded to 4, so a load of 6.5 read as 164% on a
+      // four-core box and would read as nonsense on any other size.
+      + gaugeHTML('⚙','CPU load',
+                  Math.round((h.load_1m??0) / (h.cpu_cores || 1) * 100), '%',
+                  (h.load_1m??0) / (h.cpu_cores || 1) * 100);
+  }
+  if (k === 'mobile') {
+    if (h.state === 'online' && h.battery_pct != null) {
+      const bc = h.battery_pct<25?'red':h.battery_pct<40?'orange':'green';
+      const plug = (h.plugged||'').includes('PLUGGED') ? '⚡ charging' : 'on battery';
+      return gaugeHTML('🔋','Battery', h.battery_pct, '%', h.battery_pct, bc)
+        + `<div class="host-line muted">🌡 ${h.battery_temp_c ?? '?'}°C · ${plug}</div>`;
+    }
+    return `<div class="host-line muted">unreachable${h.last_seen ? ' · seen '+(timeAgo(h.last_seen)||'') : ''}</div>`;
+  }
+  if (k === 'secondary') {
+    if (h.state === 'offline_intentional')
+      return `<div class="host-line">⏻ ${esc(h.note || 'deliberately powered off')}</div>`;
+    if (h.state === 'online')
+      return `<div class="host-line">On${h.last_seen?' · seen '+(timeAgo(h.last_seen)||''):''}</div>`;
+    return `<div class="host-line muted">Offline${h.last_seen ? ' · seen '+(timeAgo(h.last_seen)||'') : ''}</div>`;
+  }
+  return '';
+}
+
+const HOST_ORDER = ['primary','secondary','mobile'];
+function renderHosts(hosts) {
+  const grid = document.getElementById('hosts-grid');
+  if (!hosts || !Object.keys(hosts).length) return;
+  const keys = Object.keys(hosts).sort((a,b)=>{
+    const ia=HOST_ORDER.indexOf(a), ib=HOST_ORDER.indexOf(b);
+    return (ia<0?99:ia)-(ib<0?99:ib);
+  });
+  grid.innerHTML = '';
+  for (const k of keys) {
+    const h = hosts[k];
+    const card = document.createElement('div');
+    card.className = 'host-card';
+    card.innerHTML = `
+      <div class="host-hdr">
+        <span class="host-name">${esc(h.label || k)}</span>
+        <span class="host-state ${stateClass(h.state)}">${stateLabel(h.state)}</span>
+      </div>
+      ${hostBody(k, h)}`;
+    grid.appendChild(card);
+  }
+}
+
+// ── Graph D3 ──────────────────────────────────────────────────────────────
+let sim = null;
+let lastGraph = null;
+// Last /status payload, kept so the cards can be repainted once /graph has
+// supplied the agent colours — see the re-render in renderGraph().
+let lastStatus = null;
+let flowRAF = null;   // particle animation loop (messages travelling on the wire)
+
+function graphDims() {
+  // Taller in portrait so the nodes are not squashed on a phone
+  return window.innerWidth <= 600 ? { W: 380, H: 460 } : { W: 800, H: 340 };
+}
+
+function renderGraph(gd) {
+  lastGraph = gd;
+  if (flowRAF) { cancelAnimationFrame(flowRAF); flowRAF = null; }
+  gd.nodes.forEach(n => { COLORS[n.id] = n.color; });
+  // The agent cards take their colour from COLORS, which only exists once
+  // /graph has answered — and /status and /graph are fetched concurrently. So
+  // the same agent was grey or coloured depending on which response won the
+  // race, differing between two loads of the same page. Repaint the cards now
+  // that the palette is known.
+  if (lastStatus) renderAgents(lastStatus);
+
+  const svg = d3.select('#graph-svg');
+  const { W, H } = graphDims();
+  svg.attr('viewBox', `0 0 ${W} ${H}`);
+  // Pin the card's shape to the nominal frame. Without this the SVG has no CSS
+  // height, so its height is derived from the viewBox — and fitViewBox() below,
+  // which narrows the viewBox onto the drawn content, would resize the card on
+  // every layout (measured: 590px -> 1173px). The viewBox now frames, the
+  // aspect-ratio sizes.
+  svg.style('aspect-ratio', `${W} / ${H}`);
+  svg.selectAll('*').remove();
+
+  // Defs: glow filter
+  const defs = svg.append('defs');
+  const f = defs.append('filter').attr('id','glow');
+  f.append('feGaussianBlur').attr('stdDeviation','2.5').attr('result','b');
+  const fm = f.append('feMerge');
+  fm.append('feMergeNode').attr('in','b');
+  fm.append('feMergeNode').attr('in','SourceGraphic');
+
+  // Example: merge several identities of the same human operator (a web
+  // account, a mobile one, a chat bridge) into a single node, so the graph does
+  // not show one person three times. Adapt the list to your own operator ids.
+  const OPERATOR = new Set(['operator','operator-mobile','operator-chat']);
+  const canon = id => OPERATOR.has(id) ? 'operator' : id;
+  COLORS['operator'] = '#F44336';
+
+  const nodeMap = new Map();
+  gd.nodes.forEach(n => {
+    const id = canon(n.id);
+    if (!nodeMap.has(id)) {
+      nodeMap.set(id, id === 'operator'
+        ? { id, type:'operator', label:'Operator', color:'#F44336' }
+        : { ...n, id });
+    }
+  });
+  const nodes = [...nodeMap.values()];
+
+  const edgeMap = new Map();
+  gd.edges.forEach(e => {
+    const from = canon(e.from), to = canon(e.to);
+    if (from === to) return;            // a self-loop created by the merge; skip
+    const key = from + '>' + to;
+    const cur = edgeMap.get(key) || { from, to, weight:0 };
+    cur.weight += (e.weight||1);
+    edgeMap.set(key, cur);
+  });
+  const edges = [...edgeMap.values()].map(d=>({...d, source:d.from, target:d.to}));
+
+  const weights = edges.map(e=>e.weight||1);
+  const wScale  = d3.scaleLinear()
+    .domain([Math.min(...weights), Math.max(...weights,2)])
+    .range([1.2, 5]);
+
+  // Seed the nodes on a circle around the centre. Without this, D3 spirals them
+  // around (0,0) — the top-left corner of the viewBox — so the graph "explodes"
+  // on load: every node starts in that corner and is flung outwards.
+  const N = nodes.length || 1;
+  const R0 = Math.min(W, H) / 3.2;
+  nodes.forEach((d, i) => {
+    const a = (i / N) * 2 * Math.PI;
+    d.x = W/2 + Math.cos(a) * R0;
+    d.y = H/2 + Math.sin(a) * R0;
+  });
+
+  if (sim) sim.stop();
+  // forceX/forceY — rather than forceCenter alone — actually keep the nodes
+  // inside the frame: forceCenter only recentres the barycentre, it does not stop
+  // the charge repulsion from pushing nodes off screen. The frame is short
+  // (340px), hence the stronger Y strength so they do not overflow vertically.
+  // Link distance scaled to the frame and the number of nodes, rather than a
+  // fixed 90px. Fixed spacing packs any mesh into the same small knot: measured
+  // on seven nodes, the drawn content covered under a third of the frame width,
+  // and the answer is to spread the layout, not to zoom into it afterwards.
+  const linkDist = Math.max(70, Math.min(190, Math.sqrt(W * H / (nodes.length || 1)) * 0.62));
+  sim = d3.forceSimulation(nodes)
+    .force('link',    d3.forceLink(edges).id(d=>d.id).distance(linkDist).strength(0.5))
+    .force('charge',  d3.forceManyBody().strength(-260).distanceMax(340))
+    .force('x',       d3.forceX(W/2).strength(0.08))
+    .force('y',       d3.forceY(H/2).strength(0.14))
+    .force('collide', d3.forceCollide(34))
+    .alphaDecay(0.03);
+
+  // Warm the simulation up off screen so the first painted frame is already
+  // settled — otherwise the initial explosion is visible before it stabilises.
+  for (let i = 0; i < 60; i++) sim.tick();
+
+  const g = svg.append('g');
+
+  // Zoom and pan on desktop only: on touch it would swallow vertical scrolling
+  if (window.innerWidth > 600) {
+    svg.call(d3.zoom()
+      .scaleExtent([0.35, 3])
+      .on('zoom', e => g.attr('transform', e.transform)));
+  }
+
+  // Edges
+  const link = g.append('g')
+    .selectAll('line').data(edges).join('line')
+    .attr('stroke', '#30363d')
+    .attr('stroke-width', d => wScale(d.weight||1))
+    .attr('stroke-opacity', 0.75);
+
+  // ── Animation: particles travelling from sender to recipient ──────────────
+  // Emission rate follows the edge weight, so more traffic reads as a denser
+  // stream. The colour is the sending agent's.
+  const flowLayer = g.append('g').attr('pointer-events','none');
+  const flows = [];
+  const maxW = Math.max(...edges.map(e=>e.weight||1), 1);
+  let lastSpawn = 0;
+  function flowTick(ts) {
+    if (ts - lastSpawn > 130) {
+      lastSpawn = ts;
+      for (const e of edges) {
+        const rate = 0.04 + 0.22 * ((e.weight||1)/maxW);
+        if (Math.random() < rate) {
+          const col = (e.source && e.source.color) || '#cdd9e5';
+          const c = flowLayer.append('circle')
+            .attr('r', 2.8).attr('fill', col).attr('filter','url(#glow)');
+          flows.push({ e, c, t0: ts, dur: 950 + Math.random()*500 });
+        }
+      }
+    }
+    for (let i=flows.length-1; i>=0; i--) {
+      const fl = flows[i];
+      const p = (ts - fl.t0) / fl.dur;
+      if (p >= 1) { fl.c.remove(); flows.splice(i,1); continue; }
+      const s = fl.e.source, t = fl.e.target;
+      if (s && t && s.x!=null && t.x!=null) {
+        fl.c.attr('cx', s.x + (t.x-s.x)*p)
+            .attr('cy', s.y + (t.y-s.y)*p)
+            .attr('opacity', 0.9 * Math.sin(Math.PI*p));  // fade in, fade out
+      }
+    }
+    flowRAF = requestAnimationFrame(flowTick);
+  }
+  flowRAF = requestAnimationFrame(flowTick);
+
+  // Weight labels (only when >1)
+  const elbl = g.append('g')
+    .selectAll('text').data(edges.filter(e=>e.weight>1)).join('text')
+    .attr('class','edge-lbl')
+    .text(d=>d.weight);
+
+  // Nodes
+  const node = g.append('g')
+    .selectAll('g').data(nodes).join('g')
+    .call(d3.drag()
+      .on('start',(e,d)=>{ if(!e.active)sim.alphaTarget(0.3).restart(); d.fx=d.x;d.fy=d.y; })
+      .on('drag', (e,d)=>{ d.fx=e.x; d.fy=e.y; })
+      .on('end',  (e,d)=>{ if(!e.active)sim.alphaTarget(0); d.fx=null;d.fy=null; }));
+
+  node.append('circle')
+    .attr('r', 22)
+    .attr('fill', d=>d.color||FALLBACK)
+    .attr('stroke', d=>{ const c=d3.color(d.color||FALLBACK); return c?c.brighter(0.5):'#888'; })
+    .attr('stroke-width', 1.5)
+    .attr('filter','url(#glow)');
+
+  // PNG avatars, clipped to a circle inside the node.
+  node.filter(d=>avatarUrl(d.id)).each(function(d){
+    const grp = d3.select(this);
+    const cid = 'clip-' + String(d.id).replace(/[^a-z0-9]/gi,'');
+    grp.append('clipPath').attr('id', cid)
+       .append('circle').attr('r', 20);
+    grp.append('image')
+       .attr('href', avatarUrl(d.id))
+       .attr('x', -20).attr('y', -20).attr('width', 40).attr('height', 40)
+       .attr('preserveAspectRatio', 'xMidYMid slice')
+       .attr('clip-path', 'url(#'+cid+')')
+       .attr('pointer-events', 'none');
+  });
+  // Emoji or monogram fallback for nodes with no avatar, such as the operator.
+  node.filter(d=>!avatarUrl(d.id)).append('text')
+    .attr('text-anchor','middle').attr('dominant-baseline','central')
+    .attr('font-size',18).attr('font-weight',700)
+    .attr('fill','#fff').attr('pointer-events','none')
+    .text(d=>icon(d.id));
+
+  node.append('text')
+    .attr('class','node-label').attr('y',33)
+    .text(d=>d.label||d.id);
+
+  // Margins that keep the circle (r=22) and its label (~33px below the node) in frame
+  const MX = 26, MT = 26, MB = 40;
+  sim.on('tick', ()=>{
+    nodes.forEach(d=>{
+      d.x = Math.max(MX, Math.min(W - MX, d.x));
+      d.y = Math.max(MT, Math.min(H - MB, d.y));
+    });
+    link
+      .attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+      .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+    elbl
+      .attr('x',d=>(d.source.x+d.target.x)/2)
+      .attr('y',d=>(d.source.y+d.target.y)/2-4);
+    node.attr('transform',d=>`translate(${d.x},${d.y})`);
+  });
+
+  // The forces settle into a knot much smaller than the frame: on a five-agent
+  // mesh the drawn content covered 242x193 of an 800x340 viewBox — under a third
+  // of the width — which reads as an empty panel with something small in the
+  // middle. Frame what was actually drawn, so the graph uses its card whatever
+  // the size of the mesh.
+  //
+  // Two clamps, both learned by looking at the result rather than the code:
+  //  - MAX_ZOOM, because fitting a small cluster edge-to-edge blows the nodes up
+  //    to ~125px radius and the graph stops reading as a mesh;
+  //  - the frame's own aspect ratio, because `xMidYMid meet` letterboxes any box
+  //    shaped differently, which puts the empty space back on the other axis.
+  const MAX_ZOOM = 1.15;
+  function fitViewBox() {
+    if (!nodes.length) return;
+    const xs = nodes.map(d => d.x), ys = nodes.map(d => d.y);
+    let x0 = Math.min(...xs) - MX, x1 = Math.max(...xs) + MX;
+    let y0 = Math.min(...ys) - MT, y1 = Math.max(...ys) + MB;
+    let w = Math.max(x1 - x0, 1), h = Math.max(y1 - y0, 1);
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    // Never zoom past MAX_ZOOM, and never distort: grow to the frame's ratio.
+    w = Math.max(w, W / MAX_ZOOM);
+    h = Math.max(h, H / MAX_ZOOM);
+    if (w / h > W / H) h = w * H / W; else w = h * W / H;
+    svg.attr('viewBox', [cx - w / 2, cy - h / 2, w, h].join(' '));
+  }
+  fitViewBox();              // first paint is already framed
+  sim.on('end', fitViewBox); // and again once the layout stops moving
+
+  const t = new Date(gd.generated_at);
+  document.getElementById('graph-ts').textContent =
+    'graph: ' + t.toLocaleTimeString();
+}
+
+// ── Fetch ─────────────────────────────────────────────────────────────────
+async function fetchStatus() {
+  try {
+    const r = await fetch(API+'/status', {headers:HDR});
+    // A rejected token leaves an empty page and an HTTP number: say what it is
+    // and offer to enter another one, rather than looking broken.
+    if (r.status === 401) {
+      window.dispatchEvent(new Event('loom:unauthorized'));
+      throw new Error('token refused by the API');
+    }
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    const d = await r.json();
+    lastStatus = d;
+    renderAgents(d);
+    // hosts (primary/secondary/mobile); falls back to the older single-host field
+    renderHosts(d.hosts && Object.keys(d.hosts).length
+      ? d.hosts
+      : { primary: { state:'online', label:'primary host', ...d.host } });
+    const t = new Date(d.generated_at);
+    document.getElementById('last-ts').textContent = t.toLocaleTimeString();
+    document.getElementById('err').style.display = 'none';
+  } catch(e) {
+    const el = document.getElementById('err');
+    el.style.display = 'block';
+    el.textContent = '/status error: ' + e.message;
+  }
+}
+
+async function fetchGraph() {
+  try {
+    const r = await fetch(API+'/graph?window=1h', {headers:HDR});
+    if (!r.ok) return;
+    renderGraph(await r.json());
+  } catch(e) { console.warn('graph:', e); }
+}
+
+// ── WebSocket + fallback poll ──────────────────────────────────────────────
+let poll = null;
+
+function setWs(ok) {
+  const el = document.getElementById('ws-status');
+  el.textContent = ok ? 'WS ●' : 'poll';
+  el.className   = 'ws-badge ' + (ok ? 'ok' : 'err');
+}
+
+function startPoll() {
+  if (!poll) poll = setInterval(fetchStatus, 15000);
+  setWs(false);
+}
+function stopPoll() { if(poll){clearInterval(poll);poll=null;} }
+
+function connectWS() {
+  const proto  = location.protocol==='https:' ? 'wss://' : 'ws://';
+  const host   = API.replace(/^https?:\/\//,'') || location.host;
+  const url    = proto + host + '/stream?token=' + encodeURIComponent(TOKEN);
+
+  let ws;
+  try { ws = new WebSocket(url); } catch(e) { startPoll(); return; }
+
+  const ping = setInterval(()=>{
+    if(ws.readyState===WebSocket.OPEN) ws.send(JSON.stringify({ping:1}));
+  }, 25000);
+
+  ws.onopen    = ()=>{ ws.send(JSON.stringify({subscribe:['status']})); setWs(true); stopPoll(); };
+  ws.onmessage = e=>{ try{ const m=JSON.parse(e.data); if(m.topic==='status'&&m.event==='delta') fetchStatus(); }catch(_){} };
+  ws.onerror   = ()=>startPoll();
+  ws.onclose   = ()=>{ clearInterval(ping); setWs(false); startPoll(); setTimeout(connectWS,10000); };
+}
+
+// ── Re-layout au resize / rotation (debounced) ─────────────────────────────
+let resizeT = null;
+let lastW = window.innerWidth > 600;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeT);
+  resizeT = setTimeout(() => {
+    // Re-render only when crossing the mobile/desktop threshold (viewBox changes)
+    const nowW = window.innerWidth > 600;
+    if (lastGraph && nowW !== lastW) { lastW = nowW; renderGraph(lastGraph); }
+  }, 250);
+});
+
+// ── Boot ──────────────────────────────────────────────────────────────────
+(async () => {
+  await Promise.all([fetchStatus(), fetchGraph()]);
+  connectWS();
+  setInterval(fetchGraph, 30000);
+})();
+</script>
+</body>
+</html>

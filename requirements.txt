@@ -1,0 +1,3 @@
+pydantic>=2.0
+# tomllib is stdlib since Python 3.11; no extra package needed
+# fastapi / uvicorn are mesh-api dependencies, not bootstrap/schema deps

@@ -30,6 +30,7 @@ Design notes
 Configuration: see config.example.json. Point BRIDGE_CONFIG at your real file
 (kept out of version control — it holds access tokens).
 """
+import http.client
 import json
 import os
 import subprocess
@@ -80,18 +81,40 @@ class Bridge:
         self.alert_peer = cfg.get("alert_agent", "supervisor")
         if self.alert_peer not in self.agent_to_room:
             self.alert_peer = None
-        # `from` must be a peer the bus roster knows, so it defaults to the
-        # facade. Give the deployment a way to declare a dedicated id (and put
-        # it in the roster) rather than signing a machine notice with the
-        # pilot's name: the body says [bridge], the metadata should too.
-        self.alert_from = cfg.get("alert_from", self.mesh_peer)
-        # One failed sync sleeps 3 s, so ~20 consecutive failures is about a
-        # minute of real outage — long enough to ride out a blip, short enough
-        # that nobody spends a morning talking to a dead room.
-        self.sync_alert_after = int(cfg.get("sync_alert_after", 20))
+        # A machine notice must not be signed with the pilot's name. Sending it
+        # as the pilot facade is wrong twice over: the recipient reads "the
+        # operator wrote to me" at the top of its context, and the bus exempts
+        # human facades from the fleet policy, so the notice would wake an agent
+        # the operator had deliberately paused. Default to a dedicated `bridge`
+        # peer; if the roster does not know it the send is refused, and
+        # _escalate falls back to the facade *and says so* rather than losing
+        # the alert.
+        self.alert_from = cfg.get("alert_from", "bridge")
+        # Counted in seconds, not in attempts. A DNS failure returns instantly
+        # (~4 s per cycle) but a blackholed TCP peer sits in _req's 60 s timeout,
+        # so twenty *attempts* is anywhere between one minute and twenty. The
+        # count stays as a floor so a fast-failing loop still has to persist.
+        self.sync_alert_seconds = int(cfg.get("sync_alert_seconds", 60))
+        self.sync_alert_after = int(cfg.get("sync_alert_after", 3))
         self.sync_fails = 0
         self.sync_down_since = None
+        self.sync_down_at = None
         self.sync_alerted = False
+        # ---- a held message must not become a silent freeze ------------------
+        # Holding the cursor protects one reply; left unbounded it stops every
+        # room's traffic instead, and /sync stays healthy so nothing else
+        # notices. Escalate once the hold outlives `hold_alert_seconds`, and
+        # give up on that single line after `hold_skip_seconds` — giving up is
+        # survivable because the inbox file is append-only: the message stays on
+        # disk and in the notice, only the bridge stops trying to post it.
+        self.hold_alert_seconds = int(cfg.get("hold_alert_seconds", 300))
+        self.hold_skip_seconds = int(cfg.get("hold_skip_seconds", 3600))
+        self.hold_since = None
+        self.hold_key = None
+        self.hold_alerted = False
+        # Backfill: how many pages of history one gap may cost before the
+        # bridge stops digging and says the gap is wider than it can close.
+        self.backfill_max_pages = int(cfg.get("backfill_max_pages", 20))
 
     # ---- state -------------------------------------------------------------
     def _load_state(self):
@@ -151,8 +174,12 @@ class Bridge:
         self.sync_fails += 1
         if self.sync_fails == 1:
             self.sync_down_since = time.strftime("%Y-%m-%d %H:%M:%S")
+            self.sync_down_at = time.monotonic()
         log(f"sync error: {exc}")
+        down_for = time.monotonic() - (self.sync_down_at or time.monotonic())
         if self.sync_alerted or self.sync_fails < self.sync_alert_after:
+            return
+        if down_for < self.sync_alert_seconds:
             return
         self.sync_alerted = True
         self._escalate(
@@ -172,8 +199,10 @@ class Bridge:
         if alerted:
             self._escalate(
                 f"[bridge] Matrix sync recovered (was down from {since}, "
-                f"{fails} failures). Anything the pilot sent meanwhile was held "
-                "by the homeserver and is being relayed now."
+                f"{fails} failures). What the pilot sent meanwhile is being "
+                "relayed now, as far back as the server still exposes it — a "
+                "long outage can exceed the window /sync returns per room, and "
+                "any gap the bridge cannot close is reported separately."
             )
 
     def _escalate(self, text):
@@ -185,15 +214,31 @@ class Bridge:
             # would reproduce the exact defect this code exists to remove.
             log(f"OUTAGE, and no alert_agent configured to tell: {text}")
             return
-        try:
-            subprocess.run(
-                [sys.executable, self.mesh_send, self.alert_from, self.alert_peer,
-                 "high", text],
-                check=True, capture_output=True, text=True,
-            )
-            log(f"outage notice -> {self.alert_peer}")
-        except subprocess.CalledProcessError as e:
-            log(f"outage notice FAILED to={self.alert_peer}: {e.stderr.strip()} — {text}")
+        senders = [self.alert_from]
+        if self.mesh_peer != self.alert_from:
+            senders.append(self.mesh_peer)  # last resort, announced when used
+        for sender in senders:
+            try:
+                subprocess.run(
+                    [sys.executable, self.mesh_send, sender, self.alert_peer,
+                     "high", text],
+                    check=True, capture_output=True, text=True, timeout=30,
+                )
+                if sender != self.alert_from:
+                    log(f"outage notice sent as {sender}: the roster does not know "
+                        f"{self.alert_from!r}, so this machine notice carries the "
+                        "pilot's identity — declare a `bridge` peer to fix it")
+                log(f"outage notice -> {self.alert_peer}")
+                return
+            except Exception as e:
+                # Deliberately broad, and never re-raised. This runs inside the
+                # failure path of the sync loop: a mistyped `mesh_send` raising
+                # FileNotFoundError here would crash the service on every outage
+                # — a guard that kills the process it guards.
+                detail = getattr(e, "stderr", "") or str(e)
+                log(f"outage notice FAILED as {sender} to={self.alert_peer}: "
+                    f"{detail.strip()}")
+        log(f"OUTAGE, undeliverable on the bus: {text}")
 
     # ---- direction 1 : Matrix -> mesh -------------------------------------
     def poll_matrix(self):
@@ -230,7 +275,15 @@ class Bridge:
             agent = self.room_to_agent.get(room_id)
             if not agent:
                 continue
-            for ev in room.get("timeline", {}).get("events", []) or []:
+            timeline = room.get("timeline", {}) or {}
+            events = list(timeline.get("events", []) or [])
+            if timeline.get("limited"):
+                events = self._backfill(room_id, timeline.get("prev_batch"), events)
+            if events:
+                last_id = events[-1].get("event_id")
+                if last_id:
+                    self.state.setdefault("last_events", {})[room_id] = last_id
+            for ev in events:
                 if ev.get("type") != "m.room.message":
                     continue
                 # Relay to the mesh ONLY the pilot's messages. Any other sender
@@ -253,19 +306,96 @@ class Bridge:
                                                token=self.agent_tokens.get(agent))
                     except Exception as e:
                         log(f"read-receipt FAILED to={agent}: {e}")
-                self._to_mesh(agent, body)
+                self._to_mesh(agent, body, room_id)
         self._save_state()
 
-    def _to_mesh(self, agent, body):
+    def _backfill(self, room_id, prev_batch, tail):
+        """Recover what `/sync` summarised away, oldest-first.
+
+        Answering an old `since`, a homeserver returns only the last handful of
+        events per room — Conduit stops at ten and ignores a filter asking for
+        more — and flags the truncation with `limited` plus a `prev_batch`
+        token. Reading that timeline as if it were whole silently loses
+        everything before the window: precisely the messages a pilot sent while
+        the bridge was down, which is the one moment this matters.
+
+        The backfill runs **only against a known last event**. With no marker
+        for this room the bridge cannot tell an outage gap from the room's
+        entire history, and guessing in that direction is how a bridge relays a
+        year of old messages into a live mesh. No ground truth, no backfill: it
+        records the marker and moves on, losing nothing that was not already
+        lost before this code existed.
+        """
+        known = (self.state.get("last_events") or {}).get(room_id)
+        if not known or not prev_batch:
+            if not known:
+                log(f"gap in room={room_id} but no known last event — not backfilling")
+            return tail
+        seen = {e.get("event_id") for e in tail}
+        recovered, token, pages, closed = [], prev_batch, 0, False
+        while token and pages < self.backfill_max_pages:
+            pages += 1
+            try:
+                resp = self._req(
+                    "GET",
+                    f"/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}/messages",
+                    params={"dir": "b", "from": token, "limit": "100"},
+                )
+            except Exception as e:
+                log(f"backfill FAILED room={room_id}: {e}")
+                break
+            chunk = resp.get("chunk") or []
+            if not chunk:
+                closed = True
+                break
+            for ev in chunk:  # dir=b walks backwards: newest first
+                if ev.get("event_id") == known:
+                    closed = True
+                    break
+                if ev.get("event_id") not in seen:
+                    recovered.append(ev)
+            if closed:
+                break
+            token = resp.get("end")
+        if recovered:
+            recovered.reverse()  # back to chronological order for relaying
+            log(f"backfilled {len(recovered)} event(s) in room={room_id} "
+                f"over {pages} page(s)")
+        if not closed:
+            # Never report a partial recovery as a complete one.
+            self._escalate(
+                f"[bridge] gap in room {room_id} wider than the backfill limit "
+                f"({self.backfill_max_pages} pages): {len(recovered)} event(s) "
+                "recovered, older ones were NOT relayed and are only in the "
+                "room's own history."
+            )
+        return recovered + tail
+
+    def _to_mesh(self, agent, body, room_id=None):
         try:
             subprocess.run(
                 [sys.executable, self.mesh_send, self.mesh_peer, agent,
                  self.default_priority, body],
-                check=True, capture_output=True, text=True,
+                check=True, capture_output=True, text=True, timeout=30,
             )
             log(f"Matrix->mesh  to={agent}: {body[:80]!r}")
-        except subprocess.CalledProcessError as e:
-            log(f"mesh send FAILED to={agent}: {e.stderr.strip()}")
+        except Exception as e:
+            detail = (getattr(e, "stderr", "") or str(e)).strip()
+            log(f"mesh send FAILED to={agent}: {detail}")
+            # The read receipt already told the pilot "seen", and the bus
+            # refused the message: without this the pilot is looking at a tick
+            # under a message no agent will ever receive. Matrix is up in this
+            # branch — it is the bus that said no — so the room is the one place
+            # the truth can still be delivered.
+            if room_id:
+                try:
+                    self.send_matrix(
+                        room_id,
+                        f"[bridge] this message was NOT delivered to {agent}: "
+                        f"{detail[:300]}",
+                    )
+                except Exception as post_err:
+                    log(f"could not report the drop in room={room_id}: {post_err}")
 
     # ---- direction 2 : mesh -> Matrix -------------------------------------
     def poll_inbox(self):
@@ -293,11 +423,12 @@ class Bridge:
                 prefix = "" if pri in ("normal", "low") else f"[{pri}] "
                 token = self.agent_tokens.get(sender)  # post under agent identity
                 try:
-                    self.send_matrix(room_id, f"{prefix}{body}", token=token,
-                                     txn=msg.get("id"))
+                    self._post_with_fallback(room_id, f"{prefix}{body}", token,
+                                             self._txn_for(msg), sender)
                     log(f"mesh->Matrix  from={sender}: {body[:80]!r}")
+                    self._release_hold()
                 except Exception as e:
-                    if self._should_hold(e):
+                    if self._should_hold(e) and not self._hold_expired(idx, sender, body, e):
                         # Transport failure (no route, no DNS, 5xx, throttling):
                         # hold the cursor on this very line and try again next
                         # cycle. The message stays on disk, so an outage *delays*
@@ -308,17 +439,81 @@ class Bridge:
                         self.state["inbox_offset"] = idx
                         self._save_state()
                         return
-                    # Anything a retry cannot clear: a payload the server will
-                    # never accept, or a defect in this bridge. Skip it loudly.
-                    # Holding here would be worse than the bug — one poison line
-                    # would stop every room's traffic for as long as nobody is
-                    # reading the log, which is precisely the failure this code
-                    # was written to end.
-                    log(f"matrix post UNRETRYABLE, skipped from={sender}: {e!r}")
+                    # Either a retry cannot clear this (a payload the server will
+                    # never accept, or a defect in this bridge), or the hold has
+                    # outlived its deadline. Skip it loudly and keep the queue
+                    # moving: one stuck line must not stop every room, and the
+                    # message is not destroyed — the inbox file is append-only,
+                    # so it stays on disk and in the notice that was escalated.
+                    log(f"matrix post GIVEN UP, skipped from={sender}: {e!r}")
+                    self._release_hold()
             else:
                 log(f"mesh->Matrix  skip (no room for from={sender})")
         self.state["inbox_offset"] = len(lines)
         self._save_state()
+
+    def _post_with_fallback(self, room_id, text, token, txn, sender):
+        """Post as the agent; on 401/403 try once as the bot before holding.
+
+        A rotated agent token is the common way this direction dies, and it
+        dies per-agent: without the retry the bridge would hold — then give up
+        on — every reply from that one agent while the rest of the mesh looks
+        fine. Posting as the bot is a visible downgrade (the message shows up
+        under the bot identity, and the log says so), which beats not arriving.
+        """
+        try:
+            self.send_matrix(room_id, text, token=token, txn=txn)
+        except urllib.error.HTTPError as e:
+            if e.code not in (401, 403) or token is None:
+                raise
+            self.send_matrix(room_id, text, token=None, txn=txn)
+            log(f"posted as the bot, not as {sender}: its token was refused ({e.code})")
+
+    @staticmethod
+    def _txn_for(msg):
+        """A transaction id stable across retries and unlikely to collide.
+
+        The bus id is eight hex characters — 32 bits — and a homeserver that
+        never expires transaction ids (Conduit does not) turns a birthday
+        collision into a message swallowed with a 200 and no log line at all.
+        Prefixing the timestamp costs nothing and removes the class of bug;
+        both fields come from the message, so a retry still sends the same id.
+        """
+        ident, stamp = str(msg.get("id") or ""), str(msg.get("ts") or "")
+        return f"{stamp}-{ident}" if (stamp or ident) else None
+
+    def _hold_expired(self, idx, sender, body, exc):
+        """Track one held line; escalate, then let it go once it is hopeless.
+
+        Returns True when this line has been held long enough that continuing
+        to block every other room costs more than dropping it from the queue.
+        """
+        key = (idx, sender)
+        now = time.monotonic()
+        if self.hold_key != key:
+            self.hold_key, self.hold_since, self.hold_alerted = key, now, False
+            return False
+        held = now - self.hold_since
+        if not self.hold_alerted and held >= self.hold_alert_seconds:
+            self.hold_alerted = True
+            self._escalate(
+                f"[bridge] mesh->Matrix has been stuck for {int(held)}s on a "
+                f"message from {sender} ({exc!r}). Nothing from any agent is "
+                f"reaching the pilot's client meanwhile, and /sync is healthy, "
+                f"so nothing else will notice. Message text: {body[:200]!r}"
+            )
+        if held >= self.hold_skip_seconds:
+            self._escalate(
+                f"[bridge] giving up after {int(held)}s on the message from "
+                f"{sender} that was blocking mesh->Matrix ({exc!r}). It was "
+                f"NOT posted to the room; it is still in the inbox file. Text: "
+                f"{body[:200]!r}"
+            )
+            return True
+        return False
+
+    def _release_hold(self):
+        self.hold_key, self.hold_since, self.hold_alerted = None, None, False
 
     @staticmethod
     def _should_hold(exc):
@@ -333,10 +528,16 @@ class Bridge:
 
         401/403 *are* held: a revoked token or a missing invite is the
         operator's to fix, and the message loses nothing by waiting for them.
+
+        `http.client` raises a family of its own — IncompleteRead,
+        BadStatusLine — that is **not** a subclass of OSError, so a connection
+        dropped while the response was being read looked like a defect and the
+        reply was discarded. That is the failure mode of a flaky link, i.e. the
+        one this whole branch exists for.
         """
         if isinstance(exc, urllib.error.HTTPError):
             return exc.code in (401, 403, 408, 429) or exc.code >= 500
-        return isinstance(exc, OSError)  # URLError, timeouts, connection resets
+        return isinstance(exc, (OSError, http.client.HTTPException))
 
     # ---- loop --------------------------------------------------------------
     def run(self):

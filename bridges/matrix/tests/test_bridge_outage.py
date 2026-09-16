@@ -22,6 +22,8 @@ deployed mesh or the network.
 from __future__ import annotations
 
 import importlib.util
+import os
+import sys
 import json
 import time
 import urllib.error
@@ -697,3 +699,224 @@ def test_a_pilot_message_the_bus_refuses_is_reported_in_its_room(bridge_env):
 
     br._to_mesh("agent-1", "do the thing", "!a1:example.invalid")
     assert posted and "NOT delivered to agent-1" in posted[0], posted
+
+
+# --------------------------------------------------------------------------
+# Third gate round.
+# --------------------------------------------------------------------------
+
+
+def test_a_policy_refusal_is_not_routed_around(bridge_env, tmp_path):
+    """The refusal IS the feature; retrying as the pilot walks through it.
+
+    The fleet policy lets the operator put an agent out of play, and exempts
+    human facades so they can still reach it. A daemon inheriting that exemption
+    wakes a paused agent with a high-priority message signed as the operator —
+    which is precisely what the system-peer category exists to prevent.
+    """
+    _mod, br, _inbox, messages = bridge_env
+    sent = tmp_path / "sent_policy.jsonl"
+    refusing = tmp_path / "send_policy.py"
+    refusing.write_text(
+        "import json, sys\n"
+        "if sys.argv[1] == 'bridge':\n"
+        "    sys.stderr.write(\"error: 'supervisor' is paused — only the operator may write\")\n"
+        "    sys.exit(3)\n"
+        f"open({str(sent)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+    )
+    br.mesh_send = str(refusing)
+    br._escalate("[bridge] sync is down")
+
+    assert not sent.exists(), "wrote as the pilot past a policy refusal"
+    assert messages() == []
+
+
+def test_an_unknown_sender_still_falls_back(bridge_env, tmp_path):
+    """The fallback must survive the fix above: a fresh install needs it."""
+    _mod, br, _inbox, _messages = bridge_env
+    sent = tmp_path / "sent_unknown.jsonl"
+    refusing = tmp_path / "send_unknown.py"
+    refusing.write_text(
+        "import json, sys\n"
+        "if sys.argv[1] == 'bridge':\n"
+        "    sys.stderr.write(\"error: unknown from peer 'bridge' (known: ...)\")\n"
+        "    sys.exit(2)\n"
+        f"open({str(sent)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+    )
+    br.mesh_send = str(refusing)
+    br._escalate("[bridge] sync is down")
+    lines = [json.loads(l) for l in sent.read_text().splitlines() if l.strip()]
+    assert lines and lines[0][0] == "pilot-matrix", lines
+
+
+def test_a_later_gap_in_the_same_room_is_reported_again(bridge_env):
+    """Deduplicating by room alone silenced every outage after the first."""
+    _mod, br, _inbox, messages = bridge_env
+    room = "!a1:example.invalid"
+    br._to_mesh = lambda agent, body, room_id=None: None
+    br.send_read_receipt = lambda *a, **k: None
+    br.state["since"] = "old"
+
+    for marker, name in (("$m1", "first outage"), ("$m2", "weeks later")):
+        br.state["last_events"] = {room: marker}
+        br._req = lambda *a, **k: (
+            {"next_batch": "s", "rooms": {"join": {room: {"timeline": {
+                "limited": True, "prev_batch": "p1",
+                "events": [_pilot_event("$tail" + marker, name)]}}}}}
+            if a[1].endswith("/sync") else
+            (_ for _ in ()).throw(urllib.error.URLError("messages endpoint down"))
+        )
+        br.poll_matrix()
+
+    notices = [m[3] for m in messages() if "could not close the gap" in m[3]]
+    assert len(notices) == 2, notices
+
+
+def test_undatable_history_is_reported_but_not_relayed(bridge_env):
+    """When the marker is gone, nothing walked back can be dated — so none of
+    it may be relayed as if it were recent. The comment said so; the code did
+    the opposite, and pushed thirty old messages into an agent's inbox."""
+    _mod, br, _inbox, messages = bridge_env
+    room = "!a1:example.invalid"
+    br.state["since"] = "old"
+    br.state["last_events"] = {room: "$vanished"}
+    relayed = []
+    br._to_mesh = lambda agent, body, room_id=None: relayed.append(body)
+    br.send_read_receipt = lambda *a, **k: None
+
+    def fake_req(method, path, params=None, body=None, token=None):
+        if path.endswith("/sync"):
+            return {"next_batch": "s2", "rooms": {"join": {room: {"timeline": {
+                "limited": True, "prev_batch": "p1",
+                "events": [_pilot_event("$new", "genuinely new")]}}}}}
+        if params["from"] == "p1":
+            return {"chunk": [_pilot_event("$old1", "ancient one"),
+                              _pilot_event("$old2", "ancient two")], "end": "p2"}
+        return {"chunk": [], "end": None}
+
+    br._req = fake_req
+    br.poll_matrix()
+    assert relayed == ["genuinely new"], relayed
+    bodies = [m[3] for m in messages()]
+    assert any("were NOT relayed" in b for b in bodies), bodies
+
+
+def test_the_deadline_resumes_after_recovery_if_the_room_stays_dead(bridge_env, monkeypatch):
+    """Freezing the clock must not disable it — two mutants lived in that gap.
+
+    One never pushed the hold forward (giving up seconds after recovery), the
+    other never advanced the tick (never giving up at all, the original wedge).
+    """
+    mod, br, inbox, messages = bridge_env
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    br.hold_alert_seconds, br.hold_skip_seconds = 300, 3600
+    inbox.write_text(json.dumps({"from": "agent-1", "body": "for a dead room"}) + "\n")
+    br.send_matrix = lambda *a, **k: (_ for _ in ()).throw(
+        urllib.error.HTTPError("u", 500, "M_UNKNOWN", {}, None))
+
+    br._req = lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("no DNS"))
+    for _ in range(8):                       # two hours of total outage
+        br.poll_matrix(); br.poll_inbox(); clock[0] += 900
+    assert br.state["inbox_offset"] == 0, "gave up during the outage"
+
+    br._req = lambda *a, **k: {"next_batch": "s", "rooms": {}}
+    br.poll_matrix(); br.poll_inbox()
+    clock[0] += 400                          # past the alert, not the deadline
+    br.poll_matrix(); br.poll_inbox()
+    assert any("stuck for" in m[3] for m in messages()), "no stall alarm after recovery"
+    assert br.state["inbox_offset"] == 0, "gave up too early after recovery"
+
+    clock[0] += 3400                         # past the deadline, sync healthy
+    br.poll_matrix(); br.poll_inbox()
+    assert br.state["inbox_offset"] == 1, "never gave up, the queue stayed wedged"
+
+
+def test_the_marker_is_the_most_recent_event_not_just_any(bridge_env):
+    """Seeding or recording the *oldest* event replays the whole window.
+
+    Every earlier test used a single event per room, so "first" and "last" were
+    the same thing and three mutants lived there comfortably.
+    """
+    _mod, br, _inbox, _messages = bridge_env
+    room = "!a1:example.invalid"
+    br._to_mesh = lambda agent, body, room_id=None: None
+    br.send_read_receipt = lambda *a, **k: None
+    responses = [
+        {"next_batch": "s1", "rooms": {"join": {room: {"timeline": {"events": [
+            _pilot_event("$a", "older"), _pilot_event("$b", "newer")]}}}}},
+        {"next_batch": "s2", "rooms": {"join": {room: {"timeline": {"events": [
+            _pilot_event("$c", "third"), _pilot_event("$d", "fourth")]}}}}},
+    ]
+    br._req = lambda *a, **k: responses.pop(0)
+
+    br.poll_matrix()
+    assert br.state["last_events"][room] == "$b", "seeded the oldest event"
+    br.poll_matrix()
+    assert br.state["last_events"][room] == "$d", "incremental marker not advanced"
+
+
+def test_a_failing_messages_endpoint_is_reported_as_such(bridge_env):
+    """Two mutants: reporting nothing, and blaming the marker for a reset."""
+    _mod, br, _inbox, messages = bridge_env
+    room = "!a1:example.invalid"
+    br.state["since"] = "old"
+    br.state["last_events"] = {room: "$known"}
+    br._to_mesh = lambda agent, body, room_id=None: None
+    br.send_read_receipt = lambda *a, **k: None
+
+    def fake_req(method, path, params=None, body=None, token=None):
+        if path.endswith("/sync"):
+            return {"next_batch": "s2", "rooms": {"join": {room: {"timeline": {
+                "limited": True, "prev_batch": "p1",
+                "events": [_pilot_event("$e", "visible")]}}}}}
+        raise urllib.error.URLError("connection reset")
+
+    br._req = fake_req
+    br.poll_matrix()
+    bodies = [m[3] for m in messages() if "could not close the gap" in m[3]]
+    assert bodies, "a failing backfill was reported to nobody"
+    assert "stopped answering" in bodies[0], bodies[0]
+    assert "no longer exists" not in bodies[0], "blamed the marker for a network fault"
+
+
+def test_an_outage_notice_mentions_the_replies_held_behind_it(bridge_env, monkeypatch):
+    """While only /sync is dead the stall alarm is frozen by design, so the
+    outage notice is the only place those queued replies can be named."""
+    mod, br, inbox, messages = bridge_env
+    clock = [10.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    inbox.write_text(json.dumps({"from": "agent-1", "body": "queued"}) + "\n")
+    br.send_matrix = lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("down"))
+    br._req = lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("down"))
+
+    br.poll_inbox()          # starts the hold
+    for _ in range(4):
+        br.poll_matrix()
+        clock[0] += 5
+    bodies = [m[3] for m in messages()]
+    assert any("agent reply is also held" in b for b in bodies), bodies
+
+
+def test_a_system_peer_is_refused_as_a_recipient(tmp_path):
+    """It owns no inbox: accepting it writes a file nobody will ever read."""
+    import subprocess as sp
+
+    bus = Path(__file__).resolve().parents[3] / "bus"
+    home = tmp_path / "mesh"
+    home.mkdir()
+    (home / "peers.py").write_text(
+        'AGENTS = {"agent-1"}\n'
+        'PILOT_PEERS = {"pilot-matrix"}\n'
+        'SYSTEM_PEERS = {"bridge"}\n'
+    )
+    env = {**os.environ, "MESH_HOME": str(home)}
+    out = sp.run([sys.executable, str(bus / "send.py"), "agent-1", "bridge",
+                  "normal", "hello"], capture_output=True, text=True, env=env)
+    assert out.returncode == 2, out
+    assert "system sender" in out.stderr, out.stderr
+    assert not (home / "inbox-bridge.jsonl").exists()
+
+    ok = sp.run([sys.executable, str(bus / "send.py"), "bridge", "agent-1",
+                 "high", "outage"], capture_output=True, text=True, env=env)
+    assert ok.returncode == 0, ok.stderr   # ... but it remains a valid sender

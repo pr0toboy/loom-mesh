@@ -62,9 +62,11 @@ bridges/matrix/
 ├── config.example.json        # homeserver, tokens, peer, room map  → copy to config.json
 ├── agent_tokens.example.json  # per-agent access tokens             → copy to agent_tokens.json
 ├── matrix-bridge.service      # systemd --user unit
-└── hooks/
-    ├── matrix-typing-pretool.py   # PreToolUse: "<agent> is typing…"
-    └── mesh-inbox-drain-stop.py   # Stop: never finish a turn with mail pending
+├── hooks/
+│   ├── matrix-typing-pretool.py   # PreToolUse: "<agent> is typing…"
+│   └── mesh-inbox-drain-stop.py   # Stop: never finish a turn with mail pending
+└── tests/
+    └── test_bridge_outage.py      # what happens when the homeserver is unreachable
 ```
 
 `config.json` and `agent_tokens.json` hold access tokens and are **git-ignored** — only the `.example.json` templates are committed.
@@ -116,6 +118,17 @@ These hooks pair naturally with the bridge's read receipts (the "seen" tick, sen
 4. Copy `config.example.json` → `config.json` and `agent_tokens.example.json` → `agent_tokens.json`, fill in the homeserver, tokens, `pilot_user`, mesh paths and the room map.
 5. Add `pilot-matrix` (or whatever you set as `mesh_peer`) to the bus peer list so `send.py` accepts it as a valid sender.
 6. Install `matrix-bridge.service` under `~/.config/systemd/user/`, `enable --now`, and (with `loginctl enable-linger`) it survives reboots.
+
+## When the homeserver becomes unreachable
+
+Putting the homeserver behind a private overlay buys confidentiality at a price worth naming: the entire inbound path now hangs on one name resolving over that overlay. A DHCP renewal whose DNS settings overwrite the overlay's resolver is enough to break it — and the failure looks like nothing at all, because every *other* name still resolves, so the host, the agents and the bus all stay healthy while `/sync` raises `Name or service not known` a few times a minute. Nothing in the mesh depends on the bridge, which is exactly why nothing notices it is gone; the pilot goes on typing into rooms no agent will ever read, and finds out by wondering why the fleet has gone quiet.
+
+Two properties close that hole, both exercised in `bridges/matrix/tests/test_bridge_outage.py`:
+
+- **The outage is escalated onto the bus, never through the bridge.** After `sync_alert_after` consecutive sync failures (default 20, roughly a minute of real outage) the bridge writes one high-priority message to `alert_agent`, and one more when sync recovers. That agent is reached by a filesystem write with no network in the path, which is the whole point: an alert about the bridge cannot travel through the bridge, so it has to go to whoever is still reachable — a supervisor agent on the same machine, who can then act or wake someone. `alert_from` is the sender id, and it must exist in the bus roster; it defaults to the pilot facade, so declaring a dedicated `bridge` peer and pointing `alert_from` at it is the honest configuration — a machine notice should not be signed with the operator's name. Leave `alert_agent` unset and the bridge writes the full notice to its log instead, in as many words: a guard that dissolves in silence would be the defect it was added to remove.
+- **A post that fails keeps its message.** The mesh→Matrix direction used to advance the inbox cursor whether or not the post succeeded, so an agent's reply written during an outage was logged once and gone — the one direction where a message has no second copy. The cursor now stays on the failed line and the bridge retries it, turning an outage into delayed delivery. Two things make that safe rather than merely different. The retry reuses the bus message id as the Matrix **transaction id**, so a post the server accepted before its answer got lost is deduplicated instead of appearing twice — a clock-based id would trade a lost reply for a doubled one. And what is held is a *transport* failure only: no route, no DNS, a timeout, a 5xx, a 429, plus `401`/`403`, which are the operator's to fix and lose nothing by waiting. Everything else is skipped loudly — a malformed body or a room that no longer exists can never accept the same payload, and neither can a defect in the bridge itself. That last case is why the rule is written as a positive list: asking "is this hopeless?" and defaulting to *retry* quietly classified a `TypeError` in this file as a transient condition, which would stop every room's traffic behind one bad line for as long as nobody reads the log.
+
+None of this detects an outage on the pilot's side; a client that shows no reply is still the last resort. The point is only that the mesh now knows before the human has to guess.
 
 ## Tradeoffs
 

@@ -14,7 +14,12 @@ Three files can answer that question, and they are tried in this order:
 The sets are deliberately separate. ``INBOX_PEERS`` are endpoints with a file to
 read; ``FACADES`` are humans reached through a chat client, who never run
 ``read.py`` and must be answered *through the bus* rather than on a terminal;
-``SEND_PEERS`` is the union — every valid ``from``/``to``.
+``SYSTEM_PEERS`` are pieces of infrastructure that only ever *send* — the chat
+bridge reporting its own outage, for instance. They are deliberately not
+facades: a facade is exempt from the fleet policy because a human must always be
+able to reach a paused agent, and a daemon inheriting that exemption would wake
+agents the operator has deliberately put out of play, under a name that reads
+like the operator's. ``SEND_PEERS`` is the union — every valid ``from``/``to``.
 """
 from __future__ import annotations
 
@@ -43,13 +48,13 @@ def _from_env(var: str) -> tuple[str, ...]:
     return tuple(x.strip() for x in os.environ.get(var, "").split(",") if x.strip())
 
 
-def _resolve() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Return (agents, facades)."""
+def _resolve() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Return (agents, facades, system)."""
     roster = _load_module(MESH_HOME / "mesh_roster.py")
     if roster is not None:
         agents = tuple(getattr(roster, "INBOX_PEERS", None) or getattr(roster, "REAL", ()))
         facades = tuple(getattr(roster, "FACADE_PEERS", ()) or _from_env("MESH_HUMAN_FACADES"))
-        return agents, facades
+        return agents, facades, tuple(getattr(roster, "SYSTEM_PEERS", ()))
 
     peers = _load_module(MESH_HOME / "peers.py")
     if peers is not None:
@@ -57,14 +62,17 @@ def _resolve() -> tuple[tuple[str, ...], tuple[str, ...]]:
         # the mesh through (a browser, a chat bridge). They send and receive but
         # run no agent, so they belong in the facades, not in the agents.
         facades = tuple(getattr(peers, "PILOT_PEERS", ())) or _from_env("MESH_HUMAN_FACADES")
-        return tuple(getattr(peers, "AGENTS", ())), facades
+        return (tuple(getattr(peers, "AGENTS", ())), facades,
+                tuple(getattr(peers, "SYSTEM_PEERS", ())))
 
-    return (), _from_env("MESH_HUMAN_FACADES")
+    return (), _from_env("MESH_HUMAN_FACADES"), _from_env("MESH_SYSTEM_PEERS")
 
 
-AGENTS, FACADES = _resolve()
+AGENTS, FACADES, SYSTEM = _resolve()
 #: Every valid endpoint of a message, whichever side it is on.
-SEND_PEERS: frozenset[str] = frozenset(AGENTS) | frozenset(FACADES)
+SEND_PEERS: frozenset[str] = frozenset(AGENTS) | frozenset(FACADES) | frozenset(SYSTEM)
+#: Senders that are neither an agent nor a human: daemons reporting on themselves.
+SYSTEM_PEERS: frozenset[str] = frozenset(SYSTEM)
 #: Endpoints that own an inbox file and can run ``read.py <self>``.
 INBOX_PEERS: frozenset[str] = frozenset(AGENTS)
 #: Humans behind a chat client: they read elsewhere, so a reply must be sent.

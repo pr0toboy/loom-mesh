@@ -244,7 +244,12 @@ AGENTS = {${agent_list_py}}
 # The human pilot's passive peers: the webui (POSTs as user-web) and the
 # Matrix bridge (relays as pilot-matrix). Neither runs an agent.
 PILOT_PEERS = {"user-web", "pilot-matrix"}
-ALL_PEERS = sorted(AGENTS | PILOT_PEERS)
+# Infrastructure that sends but is not a human: the Matrix bridge escalates its
+# own outages here. Kept out of PILOT_PEERS on purpose — facades bypass the
+# fleet policy so a human can always reach a paused agent, and a daemon must
+# not inherit that, nor sign its notices with the operator's name.
+SYSTEM_PEERS = {"bridge"}
+ALL_PEERS = sorted(AGENTS | PILOT_PEERS | SYSTEM_PEERS)
 PYEOF
 
     cat > "$MESH_HOME/peers.sh" <<SHEOF
@@ -252,6 +257,7 @@ PYEOF
 AGENTS=(${agent_list_sh})
 # Human pilot's passive peers (webui + Matrix bridge); neither runs an agent.
 PILOT_PEERS=("user-web" "pilot-matrix")
+SYSTEM_PEERS=("bridge")
 SHEOF
 
     _ok "peers.py and peers.sh written to $MESH_HOME"

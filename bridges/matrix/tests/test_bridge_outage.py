@@ -428,10 +428,272 @@ def test_a_gap_too_wide_to_close_is_reported(bridge_env):
     br.send_read_receipt = lambda *a, **k: None
     br.poll_matrix()
     bodies = [m[3] for m in messages()]
-    assert any("wider than the backfill limit" in b for b in bodies), bodies
+    assert any("wider than 2 pages" in b for b in bodies), bodies
 
 
 def _pilot_event(event_id, body):
     return {"event_id": event_id, "type": "m.room.message",
             "sender": "@pilot:example.invalid",
             "content": {"msgtype": "m.text", "body": body}}
+
+
+# --------------------------------------------------------------------------
+# Second gate round. Every test below kills a mutant that survived the first
+# one, or covers a blocker that round introduced.
+# --------------------------------------------------------------------------
+
+
+def test_a_total_outage_does_not_burn_the_hold_deadline(bridge_env, monkeypatch):
+    """The deadline is for a message the link refuses, not for a dead link.
+
+    Replayed against the real nine-hour outage, a deadline that kept ticking
+    delivered three replies out of twelve where plain waiting delivered all
+    twelve: it turned a delay into a loss, on the exact incident this work
+    exists for. While /sync is failing there is nowhere to post anything, so
+    dropping the message buys nothing at all.
+    """
+    mod, br, inbox, _messages = bridge_env
+    clock = [1000.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    br.hold_alert_seconds, br.hold_skip_seconds = 300, 3600
+    inbox.write_text(json.dumps({"from": "agent-1", "body": "written mid-outage"}) + "\n")
+
+    br._req = lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("no DNS"))
+    br.send_matrix = lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("no DNS"))
+
+    for _ in range(12):           # nine hours of a dead homeserver
+        br.poll_matrix()
+        br.poll_inbox()
+        clock[0] += 2700          # 45 min per cycle
+    assert br.state["inbox_offset"] == 0, "gave up on a reply the outage would have delivered"
+
+    posted = []
+    br._req = lambda *a, **k: {"next_batch": "s", "rooms": {}}
+    br.send_matrix = lambda room_id, text, token=None, txn=None: posted.append(text)
+    br.poll_matrix()
+    br.poll_inbox()
+    assert posted == ["written mid-outage"], "the held reply never went out on recovery"
+
+
+def test_the_backfill_marker_is_recorded_without_help(bridge_env):
+    """The mutant that mattered most: nothing ever wrote the marker.
+
+    The first round's tests seeded `last_events` by hand, so they passed while
+    the backfill was dead on every real deployment — it can only walk back to a
+    marker that something records. Here the bridge is driven exactly as it runs:
+    a first sync, then a gap.
+    """
+    _mod, br, _inbox, _messages = bridge_env
+    room = "!a1:example.invalid"
+    relayed = []
+    br._to_mesh = lambda agent, body, room_id=None: relayed.append(body)
+    br.send_read_receipt = lambda *a, **k: None
+    responses = [
+        # first sync: establishes where the room stands
+        {"next_batch": "s1", "rooms": {"join": {room: {"timeline": {
+            "events": [_pilot_event("$e0", "before the outage")]}}}}},
+        # after the outage: only the tail, flagged limited
+        {"next_batch": "s2", "rooms": {"join": {room: {"timeline": {
+            "limited": True, "prev_batch": "p1",
+            "events": [_pilot_event("$e2", "second")]}}}}},
+    ]
+
+    def fake_req(method, path, params=None, body=None, token=None):
+        if path.endswith("/sync"):
+            return responses.pop(0)
+        return {"chunk": [_pilot_event("$e1", "first"),
+                          {"event_id": "$e0", "type": "m.room.message"}], "end": "p2"}
+
+    br._req = fake_req
+    br.poll_matrix()   # first sync: seeds the marker, relays nothing
+    assert br.state["last_events"][room] == "$e0", "no marker recorded on the first sync"
+    br.poll_matrix()   # the gap, closed against that marker
+    assert relayed == ["first", "second"], relayed
+
+
+def test_the_backfill_stops_at_the_marker_inside_a_page(bridge_env):
+    """Cutting the chunk at the marker is what stops a re-relay.
+
+    A mutant that found the marker but kept the whole page survived: with a
+    hundred events per page that is up to ninety-nine messages sent twice.
+    """
+    _mod, br, _inbox, _messages = bridge_env
+    room = "!a1:example.invalid"
+    br.state["since"] = "old"
+    br.state["last_events"] = {room: "$known"}
+    relayed = []
+    br._to_mesh = lambda agent, body, room_id=None: relayed.append(body)
+    br.send_read_receipt = lambda *a, **k: None
+
+    def fake_req(method, path, params=None, body=None, token=None):
+        if path.endswith("/sync"):
+            return {"next_batch": "s2", "rooms": {"join": {room: {"timeline": {
+                "limited": True, "prev_batch": "p1",
+                "events": [_pilot_event("$new", "new")]}}}}}
+        return {"chunk": [_pilot_event("$gap", "in the gap"),
+                          {"event_id": "$known", "type": "m.room.message"},
+                          _pilot_event("$ancient", "already relayed last week")],
+                "end": "p2"}
+
+    br._req = fake_req
+    br.poll_matrix()
+    assert relayed == ["in the gap", "new"], relayed
+
+
+def test_the_backfill_follows_the_end_token_to_the_next_page(bridge_env):
+    """One page is not a gap. Ignoring `end` silently truncates every long one."""
+    _mod, br, _inbox, _messages = bridge_env
+    room = "!a1:example.invalid"
+    br.state["since"] = "old"
+    br.state["last_events"] = {room: "$known"}
+    relayed, pages = [], []
+    br._to_mesh = lambda agent, body, room_id=None: relayed.append(body)
+    br.send_read_receipt = lambda *a, **k: None
+
+    def fake_req(method, path, params=None, body=None, token=None):
+        if path.endswith("/sync"):
+            return {"next_batch": "s2", "rooms": {"join": {room: {"timeline": {
+                "limited": True, "prev_batch": "p1",
+                "events": [_pilot_event("$e3", "third")]}}}}}
+        pages.append(params["from"])
+        if params["from"] == "p1":
+            return {"chunk": [_pilot_event("$e2", "second")], "end": "p2"}
+        return {"chunk": [_pilot_event("$e1", "first"),
+                          {"event_id": "$known", "type": "m.room.message"}], "end": None}
+
+    br._req = fake_req
+    br.poll_matrix()
+    assert pages == ["p1", "p2"], pages
+    assert relayed == ["first", "second", "third"], relayed
+
+
+def test_history_running_out_before_the_marker_is_reported(bridge_env):
+    """An empty page is not a closed gap — it means the marker is gone.
+
+    Treating it as "done" relays everything walked back so far as if it were
+    recent. That is how an archive lands on top of a live conversation.
+    """
+    _mod, br, _inbox, messages = bridge_env
+    room = "!a1:example.invalid"
+    br.state["since"] = "old"
+    br.state["last_events"] = {room: "$vanished"}
+    br._to_mesh = lambda agent, body, room_id=None: None
+    br.send_read_receipt = lambda *a, **k: None
+
+    def fake_req(method, path, params=None, body=None, token=None):
+        if path.endswith("/sync"):
+            return {"next_batch": "s2", "rooms": {"join": {room: {"timeline": {
+                "limited": True, "prev_batch": "p1",
+                "events": [_pilot_event("$e9", "visible")]}}}}}
+        if params["from"] == "p1":
+            return {"chunk": [_pilot_event("$old", "ancient")], "end": "p2"}
+        return {"chunk": [], "end": None}
+
+    br._req = fake_req
+    br.poll_matrix()
+    bodies = [m[3] for m in messages()]
+    assert any("no longer exists" in b for b in bodies), bodies
+
+
+def test_a_gap_with_no_marker_is_escalated_not_just_logged(bridge_env):
+    """Every deployment meets this path first, so silence here is the default.
+
+    The recovery notice promises that a gap it cannot close is reported; a log
+    line nobody reads is not that.
+    """
+    _mod, br, _inbox, messages = bridge_env
+    room = "!a1:example.invalid"
+    br.state["since"] = "old"
+    br._to_mesh = lambda agent, body, room_id=None: None
+    br.send_read_receipt = lambda *a, **k: None
+    br._req = lambda *a, **k: {"next_batch": "s2", "rooms": {"join": {room: {"timeline": {
+        "limited": True, "prev_batch": "p1",
+        "events": [_pilot_event("$e1", "only this")]}}}}}
+
+    br.poll_matrix()
+    bodies = [m[3] for m in messages()]
+    assert any("no recorded last event" in b for b in bodies), bodies
+    br.poll_matrix()  # ... but it says it once per room, not once per sync
+    assert sum("no recorded last event" in m[3] for m in messages()) == 1
+
+
+def test_the_sync_alert_waits_for_seconds_not_attempts(bridge_env, monkeypatch):
+    """Twenty attempts is a minute on a DNS failure and twenty on a dead peer.
+
+    Every earlier test set the threshold to zero, so the clock it now depends on
+    was never exercised.
+    """
+    mod, br, _inbox, messages = bridge_env
+    clock = [500.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    br.sync_alert_seconds, br.sync_alert_after = 60, 3
+    br._req = lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("down"))
+
+    for _ in range(10):      # ten fast failures inside twenty seconds
+        br.poll_matrix()
+        clock[0] += 2
+    assert messages() == [], "alerted on attempts, before the outage was real"
+
+    clock[0] += 60
+    br.poll_matrix()
+    assert len(messages()) == 1
+
+
+def test_a_stalled_hold_warns_once_not_every_cycle(bridge_env, monkeypatch):
+    """A guard that repeats every second is noise, and noise is not a signal."""
+    mod, br, inbox, messages = bridge_env
+    clock = [10.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    br.hold_alert_seconds, br.hold_skip_seconds = 10, 100000
+    inbox.write_text(json.dumps({"from": "agent-1", "body": "stuck"}) + "\n")
+    br.send_matrix = lambda *a, **k: (_ for _ in ()).throw(
+        urllib.error.HTTPError("u", 500, "M_UNKNOWN", {}, None))
+
+    for _ in range(40):
+        br.poll_inbox()
+        clock[0] += 1
+    assert sum("stuck for" in m[3] for m in messages()) == 1, [m[3] for m in messages()]
+
+
+def test_the_escalation_falls_back_when_the_roster_refuses_bridge(bridge_env, tmp_path):
+    """The fallback path had no test, and it is the one a fresh install takes."""
+    _mod, br, _inbox, messages = bridge_env
+    refusing = tmp_path / "send_refusing.py"
+    sent = tmp_path / "sent2.jsonl"
+    refusing.write_text(
+        "import json, sys\n"
+        "if sys.argv[1] == 'bridge':\n"
+        "    sys.stderr.write(\"error: unknown from peer 'bridge'\")\n"
+        "    sys.exit(2)\n"
+        f"open({str(sent)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+    )
+    br.mesh_send = str(refusing)
+    br._escalate("[bridge] something broke")
+
+    lines = [json.loads(l) for l in sent.read_text().splitlines() if l.strip()]
+    assert lines and lines[0][0] == "pilot-matrix", lines
+    assert messages() == []
+
+
+def test_a_broken_mesh_send_cannot_kill_the_loop(bridge_env, capsys):
+    """The guard must not crash the service it guards.
+
+    A mistyped `mesh_send` raises FileNotFoundError, which is not a
+    CalledProcessError: uncaught, it propagates out of the sync failure path and
+    restarts the bridge every minute, alerting no one.
+    """
+    _mod, br, _inbox, _messages = bridge_env
+    br.mesh_send = "/nonexistent/send.py"
+    br._escalate("[bridge] something broke")   # must not raise
+    assert "undeliverable" in capsys.readouterr().out
+
+
+def test_a_pilot_message_the_bus_refuses_is_reported_in_its_room(bridge_env):
+    """The read receipt already said "seen"; the bus then dropped the message."""
+    _mod, br, _inbox, _messages = bridge_env
+    br.mesh_send = "/nonexistent/send.py"
+    posted = []
+    br.send_matrix = lambda room_id, text, token=None, txn=None: posted.append(text)
+
+    br._to_mesh("agent-1", "do the thing", "!a1:example.invalid")
+    assert posted and "NOT delivered to agent-1" in posted[0], posted

@@ -110,8 +110,12 @@ class Bridge:
         self.hold_alert_seconds = int(cfg.get("hold_alert_seconds", 300))
         self.hold_skip_seconds = int(cfg.get("hold_skip_seconds", 3600))
         self.hold_since = None
+        self.hold_ticked_at = None
         self.hold_key = None
         self.hold_alerted = False
+        # Rooms already reported as un-backfillable, so one unusable marker
+        # does not escalate on every single sync.
+        self.gap_reported = set()
         # Backfill: how many pages of history one gap may cost before the
         # bridge stops digging and says the gap is wider than it can close.
         self.backfill_max_pages = int(cfg.get("backfill_max_pages", 20))
@@ -267,6 +271,16 @@ class Bridge:
                 log(f"join error {room_id}: {e}")
 
         if first_sync:
+            # Record where each room stands right now. Without this seed the
+            # backfill has no ground truth to walk back to, so the first gap a
+            # deployment ever hits is also the one it cannot close — and the
+            # tail is already in this very response, so there is nothing to
+            # fetch and nothing to guess.
+            for room_id, room in (resp.get("rooms", {}).get("join", {}) or {}).items():
+                evs = (room.get("timeline", {}) or {}).get("events") or []
+                last_id = evs[-1].get("event_id") if evs else None
+                if last_id:
+                    self.state.setdefault("last_events", {})[room_id] = last_id
             self._save_state()
             return  # we just captured next_batch
 
@@ -328,11 +342,21 @@ class Bridge:
         """
         known = (self.state.get("last_events") or {}).get(room_id)
         if not known or not prev_batch:
-            if not known:
-                log(f"gap in room={room_id} but no known last event — not backfilling")
+            # Silence here was the bug the second review found: every existing
+            # deployment starts with no marker, so this is the *normal* path on
+            # the first gap, not a corner case — and the recovery notice was
+            # promising that any gap would be reported.
+            self._report_gap(
+                room_id,
+                f"[bridge] room {room_id} came back with a gap and no recorded "
+                "last event: an outage gap cannot be told apart from the room's "
+                "whole history, so NOTHING was backfilled. Messages sent while "
+                "the bridge was down may be missing from the mesh — they are "
+                "still in the room itself.",
+            )
             return tail
         seen = {e.get("event_id") for e in tail}
-        recovered, token, pages, closed = [], prev_batch, 0, False
+        recovered, token, pages, closed, failure = [], prev_batch, 0, False, None
         while token and pages < self.backfill_max_pages:
             pages += 1
             try:
@@ -343,10 +367,15 @@ class Bridge:
                 )
             except Exception as e:
                 log(f"backfill FAILED room={room_id}: {e}")
+                failure = str(e)
                 break
             chunk = resp.get("chunk") or []
             if not chunk:
-                closed = True
+                # Ran out of history without meeting the marker. The marker is
+                # gone (a homeserver restored from backup, a hand-edited state),
+                # so everything walked back so far is of unknown age: relaying it
+                # as a recovery is how an archive lands on top of a live
+                # conversation. `closed` stays False, which reports it.
                 break
             for ev in chunk:  # dir=b walks backwards: newest first
                 if ev.get("event_id") == known:
@@ -362,14 +391,35 @@ class Bridge:
             log(f"backfilled {len(recovered)} event(s) in room={room_id} "
                 f"over {pages} page(s)")
         if not closed:
-            # Never report a partial recovery as a complete one.
-            self._escalate(
-                f"[bridge] gap in room {room_id} wider than the backfill limit "
-                f"({self.backfill_max_pages} pages): {len(recovered)} event(s) "
-                "recovered, older ones were NOT relayed and are only in the "
-                "room's own history."
+            # Never report a partial recovery as a complete one — and name the
+            # actual reason: "the server stopped answering" and "the history ran
+            # out before the marker" call for different repairs, and one of them
+            # means the marker itself is gone.
+            if failure:
+                why = f"the server stopped answering ({failure})"
+            elif pages >= self.backfill_max_pages:
+                why = f"the gap is wider than {self.backfill_max_pages} pages"
+            else:
+                why = ("the room's history ran out before the last event this "
+                       "bridge had relayed — that marker no longer exists")
+            self._report_gap(
+                room_id,
+                f"[bridge] could not close the gap in room {room_id}: {why}. "
+                f"{len(recovered)} event(s) recovered and relayed; anything "
+                "older was NOT, and is only in the room itself.",
             )
+            # The marker still advances to the visible tail afterwards: the lost
+            # events are unreachable either way, and re-reporting them on every
+            # sync would bury the notice that matters.
         return recovered + tail
+
+    def _report_gap(self, room_id, text):
+        """Escalate a gap once per room, so one bad marker is not a siren."""
+        if room_id in self.gap_reported:
+            log(f"gap in room={room_id} (already reported)")
+            return
+        self.gap_reported.add(room_id)
+        self._escalate(text)
 
     def _to_mesh(self, agent, body, room_id=None):
         try:
@@ -492,6 +542,19 @@ class Bridge:
         now = time.monotonic()
         if self.hold_key != key:
             self.hold_key, self.hold_since, self.hold_alerted = key, now, False
+            self.hold_ticked_at = now
+            return False
+        # The deadline exists for a failure specific to THIS message — a dead
+        # room, a payload one server hates. While /sync is failing too, the link
+        # itself is down: skipping buys nothing (there is nowhere to post
+        # anything, and the queue behind is just as stuck) and costs a reply
+        # that would have gone out on recovery. Replayed against a real 9h45
+        # outage, a deadline that kept running delivered 3 messages out of 12
+        # where simply waiting delivered 12. So the clock only runs while the
+        # bridge can actually reach the homeserver.
+        elapsed, self.hold_ticked_at = now - self.hold_ticked_at, now
+        if self.sync_fails:
+            self.hold_since += elapsed  # outage time is not held time
             return False
         held = now - self.hold_since
         if not self.hold_alerted and held >= self.hold_alert_seconds:
@@ -514,6 +577,7 @@ class Bridge:
 
     def _release_hold(self):
         self.hold_key, self.hold_since, self.hold_alerted = None, None, False
+        self.hold_ticked_at = None
 
     @staticmethod
     def _should_hold(exc):

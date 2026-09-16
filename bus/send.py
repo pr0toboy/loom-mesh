@@ -41,7 +41,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from roster import FACADE_PEERS, SEND_PEERS as AGENTS  # noqa: E402
+from roster import FACADE_PEERS, SEND_PEERS as AGENTS, SYSTEM_PEERS  # noqa: E402
 
 MESH_DIR = Path(os.environ.get("MESH_HOME", os.path.expanduser("~/mesh")))
 #: Endpoints a fleet policy may reserve for the operator.
@@ -173,6 +173,14 @@ def main() -> None:
         sys.exit(2)
     if to_a not in AGENTS and not _TOPIC_RE.match(to_a):
         print(f"error: unknown to peer '{to_a}' (known: {sorted(AGENTS)} or topic-<slug>)",
+              file=sys.stderr)
+        sys.exit(2)
+    if to_a in SYSTEM_PEERS:
+        # A system peer sends and is never read: it owns no inbox and cannot run
+        # read.py. Accepting it as a recipient wrote a file nobody would ever
+        # open while telling the sender "appended", which is the worst of both —
+        # the message looks delivered and is simply gone.
+        print(f"error: '{to_a}' is a system sender, not a recipient — it has no inbox",
               file=sys.stderr)
         sys.exit(2)
     if from_a == to_a:

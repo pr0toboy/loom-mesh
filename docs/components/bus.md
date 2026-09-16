@@ -43,10 +43,22 @@ The "peers" of the mesh are listed in `peers.py`:
 # peers.py
 AGENTS = {"agent-1", "agent-2", "agent-3", "supervisor", "agent-4", "agent-5"}
 PILOT_PEERS = {"user-web", "pilot-matrix"}   # the human pilot's passive peers
-ALL_PEERS = AGENTS | PILOT_PEERS
+SYSTEM_PEERS = {"bridge"}                    # infrastructure that only sends
+ALL_PEERS = AGENTS | PILOT_PEERS | SYSTEM_PEERS
 ```
 
 `user-web` is the webui's sender identity; `pilot-matrix` is the Matrix bridge's peer (it has its own `inbox-pilot-matrix.jsonl`). Neither runs an agent — they're just valid `from`/`to` endpoints.
+
+`SYSTEM_PEERS` is the third kind, and the distinction is a safety property rather
+than bookkeeping. A facade is **exempt from the fleet policy**, because a human
+must always be able to reach an agent they have paused. A daemon reporting on
+itself — the Matrix bridge escalating its own outage — must inherit neither that
+exemption nor the operator's name on a high-priority message. So a system peer is
+a valid `from`, is refused as a `to` (it owns no inbox and would never be read),
+and stays subject to every policy a human bypasses. A deployment with its own
+`mesh_roster.py` generator must declare `SYSTEM_PEERS` there too: without it the
+bridge's sender is unknown, every notice falls back to the facade identity, and
+the guarantee above quietly stops holding.
 
 `bootstrap.sh` writes an equivalent `peers.sh` for shell scripts that want the
 same list.
@@ -61,8 +73,8 @@ accepted shapes:
 
 | File | Written by | Exposes |
 |---|---|---|
-| `mesh_roster.py` | a deployment's own generator | `INBOX_PEERS`, `FACADE_PEERS` |
-| `peers.py` | `bootstrap.sh` | `AGENTS`, `PILOT_PEERS` |
+| `mesh_roster.py` | a deployment's own generator | `INBOX_PEERS`, `FACADE_PEERS`, `SYSTEM_PEERS` |
+| `peers.py` | `bootstrap.sh` | `AGENTS`, `PILOT_PEERS`, `SYSTEM_PEERS` |
 | *(neither)* | — | an empty roster: every peer is unknown, and the bus says so |
 
 The empty case fails closed on purpose. Writing to an inbox is close to running

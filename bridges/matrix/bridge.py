@@ -190,9 +190,24 @@ class Bridge:
             f"[bridge] Matrix sync failing since {self.sync_down_since} "
             f"({self.sync_fails} consecutive failures, last error: {exc}). "
             "Messages from the pilot are NOT reaching the mesh until this is "
-            "fixed, and the pilot has no way to know. This notice travelled "
-            "over the bus because the bridge cannot deliver its own alert."
+            "fixed, and the pilot has no way to know."
+            + self._held_suffix() +
+            " This notice travelled over the bus because the bridge cannot "
+            "deliver its own alert."
         )
+
+    def _held_suffix(self):
+        """Name the replies stuck behind this outage, if any.
+
+        The two directions fail together but are reported apart: when only
+        `/sync` is dead the stall alarm stays silent by design (its clock is
+        frozen), so without this line an outage notice would describe half the
+        damage and the agents' queued replies would go unmentioned.
+        """
+        if not self.hold_key:
+            return ""
+        return (f" At least one agent reply is also held behind this outage "
+                f"(from {self.hold_key[1]}), waiting to be posted.")
 
     def _sync_recovered(self):
         if not self.sync_fails:
@@ -236,13 +251,35 @@ class Bridge:
                 return
             except Exception as e:
                 # Deliberately broad, and never re-raised. This runs inside the
-                # failure path of the sync loop: a mistyped `mesh_send` raising
-                # FileNotFoundError here would crash the service on every outage
-                # — a guard that kills the process it guards.
-                detail = getattr(e, "stderr", "") or str(e)
-                log(f"outage notice FAILED as {sender} to={self.alert_peer}: "
-                    f"{detail.strip()}")
+                # failure path of the sync loop, and the realistic escape is
+                # TimeoutExpired — send.py takes an exclusive lock on the inbox,
+                # so a stuck holder blocks it past the timeout. A guard that
+                # crashes the service it watches is worse than no guard.
+                detail = (getattr(e, "stderr", "") or str(e)).strip()
+                log(f"outage notice FAILED as {sender} to={self.alert_peer}: {detail}")
+                if not self._is_unknown_peer(e):
+                    # Anything other than "this sender does not exist" must NOT
+                    # be retried under the pilot's name. The fleet policy refuses
+                    # a machine sender writing to a paused agent (exit 3) — that
+                    # refusal is the feature: retrying as the human facade walks
+                    # straight through it and wakes an agent the operator took
+                    # out of play, with a high-priority message signed as them.
+                    break
         log(f"OUTAGE, undeliverable on the bus: {text}")
+
+    @staticmethod
+    def _is_unknown_peer(exc):
+        """True only for "the roster has never heard of this sender".
+
+        The distinction carries the whole weight of `alert_from`: an unknown
+        sender is a deployment that has not declared the bridge, and falling
+        back to the facade merely degrades the identity. Every other refusal —
+        a paused recipient above all — is a decision to respect, not an
+        obstacle to route around.
+        """
+        if not isinstance(exc, subprocess.CalledProcessError):
+            return False
+        return exc.returncode == 2 and "unknown from peer" in (exc.stderr or "")
 
     # ---- direction 1 : Matrix -> mesh -------------------------------------
     def poll_matrix(self):
@@ -347,7 +384,7 @@ class Bridge:
             # the first gap, not a corner case — and the recovery notice was
             # promising that any gap would be reported.
             self._report_gap(
-                room_id,
+                room_id, known,
                 f"[bridge] room {room_id} came back with a gap and no recorded "
                 "last event: an outage gap cannot be told apart from the room's "
                 "whole history, so NOTHING was backfilled. Messages sent while "
@@ -400,10 +437,22 @@ class Bridge:
             elif pages >= self.backfill_max_pages:
                 why = f"the gap is wider than {self.backfill_max_pages} pages"
             else:
-                why = ("the room's history ran out before the last event this "
-                       "bridge had relayed — that marker no longer exists")
+                # The walk reached the start of the room's history without ever
+                # meeting the marker, so the marker is gone and NOTHING here can
+                # be dated: these events may be years old. Relaying them anyway
+                # is how an archive lands on top of a live conversation — the
+                # comment above said so while the code did it.
+                self._report_gap(
+                    room_id, known,
+                    f"[bridge] could not close the gap in room {room_id}: the "
+                    "room's history ran out before the last event this bridge "
+                    "had relayed, so that marker no longer exists. "
+                    f"{len(recovered)} older event(s) were found and were NOT "
+                    "relayed — their age is unknown, and they are in the room.",
+                )
+                return tail
             self._report_gap(
-                room_id,
+                room_id, known,
                 f"[bridge] could not close the gap in room {room_id}: {why}. "
                 f"{len(recovered)} event(s) recovered and relayed; anything "
                 "older was NOT, and is only in the room itself.",
@@ -413,12 +462,21 @@ class Bridge:
             # sync would bury the notice that matters.
         return recovered + tail
 
-    def _report_gap(self, room_id, text):
-        """Escalate a gap once per room, so one bad marker is not a siren."""
-        if room_id in self.gap_reported:
-            log(f"gap in room={room_id} (already reported)")
+    def _report_gap(self, room_id, marker, text):
+        """Escalate a gap once per (room, marker) — never once per room.
+
+        Keyed by room alone, the second unclosable gap in a room stayed silent
+        for the life of the process: weeks apart, different outage, no notice.
+        The marker moves on after every gap, so it identifies the episode; the
+        siren this guard was meant to prevent — the same failure re-reported on
+        every sync — happens within one episode, and that is exactly what the
+        pair still suppresses.
+        """
+        key = (room_id, marker)
+        if key in self.gap_reported:
+            log(f"gap in room={room_id} (already reported for this marker)")
             return
-        self.gap_reported.add(room_id)
+        self.gap_reported.add(key)
         self._escalate(text)
 
     def _to_mesh(self, agent, body, room_id=None):

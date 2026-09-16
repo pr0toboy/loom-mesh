@@ -10,6 +10,10 @@
   "state_file": "/home/you/matrix/bridge/state.json",
   "default_priority": "normal",
 
+  "alert_agent": "supervisor",
+  "alert_from": "pilot-matrix",
+  "sync_alert_after": 20,
+
   "agent_tokens_file": "/home/you/matrix/bridge/agent_tokens.json",
 
   "rooms": {

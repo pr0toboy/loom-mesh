@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 import urllib.error
 from pathlib import Path
 
@@ -61,6 +62,7 @@ def bridge_env(tmp_path: Path):
         "rooms": {"agent-1": "!a1:example.invalid",
                   "supervisor": "!sup:example.invalid"},
         "sync_alert_after": 3,
+        "sync_alert_seconds": 0,
     }
     br = mod.Bridge(cfg)
 
@@ -87,7 +89,7 @@ def test_sustained_sync_outage_is_escalated_over_the_bus(bridge_env):
     out = messages()
     assert len(out) == 1, "a sustained outage told nobody"
     sender, to, priority, body = out[0]
-    assert (sender, to, priority) == ("pilot-matrix", "supervisor", "high")
+    assert (sender, to, priority) == ("bridge", "supervisor", "high")
     assert "[bridge]" in body and "Name or service not known" in body
 
     br.poll_matrix()  # still down: one notice per outage, not one per cycle
@@ -165,7 +167,8 @@ def test_a_retried_post_reuses_its_transaction_id(bridge_env):
     """
     _mod, br, inbox, _messages = bridge_env
     inbox.write_text(
-        json.dumps({"id": "a1b2c3d4", "from": "agent-1", "body": "once"}) + "\n"
+        json.dumps({"id": "a1b2c3d4", "ts": "2026-09-16T15:00:00+02:00",
+                    "from": "agent-1", "body": "once"}) + "\n"
     )
     seen = []
 
@@ -177,7 +180,8 @@ def test_a_retried_post_reuses_its_transaction_id(bridge_env):
     br.send_matrix = flaky
     br.poll_inbox()   # fails, holds
     br.poll_inbox()   # retries
-    assert seen == ["a1b2c3d4", "a1b2c3d4"], f"transaction id changed: {seen}"
+    assert len(seen) == 2 and seen[0] == seen[1], f"transaction id changed: {seen}"
+    assert "a1b2c3d4" in seen[0] and "2026-09-16" in seen[0], seen[0]
 
 
 def test_a_defect_in_the_bridge_does_not_wedge_every_room(bridge_env):
@@ -216,3 +220,218 @@ def test_auth_failure_holds_rather_than_drops(bridge_env):
     br.send_matrix = forbidden
     br.poll_inbox()
     assert br.state["inbox_offset"] == 0
+
+
+# --------------------------------------------------------------------------
+# The gate review found these by mutation: each one below kills a mutant that
+# survived the first round, or covers a blocker the first round missed.
+# --------------------------------------------------------------------------
+
+
+def test_a_5xx_is_held_not_dropped(bridge_env):
+    """The commonest transport failure after DNS, and nothing covered it.
+
+    A mutant turning `>= 500` into `>= 600` survived the first test round: no
+    test ever posted against a failing server, only against a missing one.
+    """
+    _mod, br, inbox, _messages = bridge_env
+    inbox.write_text(json.dumps({"from": "agent-1", "body": "held"}) + "\n")
+    br.send_matrix = lambda *a, **k: (_ for _ in ()).throw(
+        urllib.error.HTTPError("u", 502, "Bad Gateway", {}, None)
+    )
+    br.poll_inbox()
+    assert br.state["inbox_offset"] == 0
+
+
+def test_a_refused_agent_token_falls_back_to_the_bot(bridge_env):
+    """A rotated token kills one agent's replies; the bot can still deliver."""
+    _mod, br, inbox, _messages = bridge_env
+    br.agent_tokens = {"agent-1": "stale-token"}
+    inbox.write_text(json.dumps({"from": "agent-1", "body": "still arrives"}) + "\n")
+    tokens_tried = []
+
+    def post(room_id, text, token=None, txn=None):
+        tokens_tried.append(token)
+        if token is not None:
+            raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+
+    br.send_matrix = post
+    br.poll_inbox()
+    assert tokens_tried == ["stale-token", None], "never retried as the bot"
+    assert br.state["inbox_offset"] == 1, "delivered, so the cursor must move"
+
+
+def test_a_second_outage_alerts_again(bridge_env):
+    """`sync_alerted` has to be cleared on recovery, or only the first is seen.
+
+    A mutant that never reset the flag survived: every test stopped at one
+    outage, and a bridge that warns once per process is a bridge that warns once
+    a year.
+    """
+    _mod, br, _inbox, messages = bridge_env
+    down = lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("down"))
+    up = lambda *a, **k: {"next_batch": "s", "rooms": {}}
+
+    br._req = down
+    for _ in range(3):
+        br.poll_matrix()
+    br._req = up
+    br.poll_matrix()
+    br._req = down
+    for _ in range(3):
+        br.poll_matrix()
+
+    bodies = [m[3] for m in messages()]
+    assert sum("failing since" in b for b in bodies) == 2, bodies
+
+
+def test_a_held_line_persists_its_cursor_to_disk(bridge_env):
+    """Holding in memory only would replay the whole inbox after a restart."""
+    _mod, br, inbox, _messages = bridge_env
+    inbox.write_text(
+        json.dumps({"from": "agent-1", "body": "one"}) + "\n"
+        + json.dumps({"from": "agent-1", "body": "two"}) + "\n"
+    )
+    posted = []
+
+    def post(room_id, text, token=None, txn=None):
+        if text == "two":
+            raise urllib.error.URLError("down")
+        posted.append(text)
+
+    br.send_matrix = post
+    br.poll_inbox()
+    on_disk = json.loads(br.state_file.read_text())
+    assert on_disk["inbox_offset"] == 1, "the held position never reached disk"
+
+
+def test_a_read_interrupted_mid_response_is_held(bridge_env):
+    """`http.client` errors are not `OSError`, so the first rule dropped them."""
+    import http.client
+
+    _mod, br, inbox, _messages = bridge_env
+    inbox.write_text(json.dumps({"from": "agent-1", "body": "keep"}) + "\n")
+    br.send_matrix = lambda *a, **k: (_ for _ in ()).throw(
+        http.client.IncompleteRead(b"half")
+    )
+    br.poll_inbox()
+    assert br.state["inbox_offset"] == 0
+
+
+def test_a_stuck_hold_escalates_then_lets_go(bridge_env):
+    """Protecting one reply must not silently freeze every room forever.
+
+    This is the regression the review caught: a 500 on one bad room id is held
+    by the transport rule, `/sync` stays healthy, and nothing on the bus ever
+    says that the whole agent->pilot direction has stopped.
+    """
+    _mod, br, inbox, messages = bridge_env
+    br.hold_alert_seconds, br.hold_skip_seconds = 0, 0.01
+    inbox.write_text(
+        json.dumps({"from": "agent-1", "body": "the stuck one"}) + "\n"
+        + json.dumps({"from": "supervisor", "body": "behind it"}) + "\n"
+    )
+    posted = []
+
+    def post(room_id, text, token=None, txn=None):
+        if "stuck" in text:
+            raise urllib.error.HTTPError("u", 500, "M_UNKNOWN", {}, None)
+        posted.append(text)
+
+    br.send_matrix = post
+    br.poll_inbox()                      # first failure: starts the hold
+    assert br.state["inbox_offset"] == 0
+    time.sleep(0.05)
+    br.poll_inbox()                      # deadline passed: warn, give up, move on
+    bodies = [m[3] for m in messages()]
+    assert any("stuck for" in b for b in bodies), bodies
+    assert any("giving up" in b for b in bodies), bodies
+    assert posted == ["behind it"], "the queue stayed frozen behind one message"
+    assert br.state["inbox_offset"] == 2
+
+
+def test_a_gap_after_an_outage_is_backfilled(bridge_env):
+    """A long outage exceeds the window /sync returns, and it says so.
+
+    Conduit caps an incremental sync at ten events per room and ignores a
+    filter asking for more, so the messages a pilot sent during the outage —
+    the ones that matter most — fall outside the timeline entirely.
+    """
+    _mod, br, _inbox, _messages = bridge_env
+    room = "!a1:example.invalid"
+    br.state["since"] = "old"
+    br.state["last_events"] = {room: "$known"}
+    relayed = []
+    br._to_mesh = lambda agent, body, room_id=None: relayed.append(body)
+
+    def fake_req(method, path, params=None, body=None, token=None):
+        if path.endswith("/sync"):
+            return {"next_batch": "s2", "rooms": {"join": {room: {"timeline": {
+                "limited": True, "prev_batch": "p1",
+                "events": [_pilot_event("$e3", "third")]}}}}}
+        assert "/messages" in path and params["dir"] == "b"
+        return {"chunk": [_pilot_event("$e2", "second"),
+                          _pilot_event("$e1", "first"),
+                          {"event_id": "$known", "type": "m.room.message"}],
+                "end": "p2"}
+
+    br._req = fake_req
+    br.send_read_receipt = lambda *a, **k: None
+    br.poll_matrix()
+    assert relayed == ["first", "second", "third"], relayed
+
+
+def test_a_gap_is_not_backfilled_without_a_known_last_event(bridge_env):
+    """No ground truth, no backfill — or a first run replays a year of history.
+
+    A bridge that guesses here floods the mesh with old messages; that has
+    happened, and it buries the live ones under the archive.
+    """
+    _mod, br, _inbox, _messages = bridge_env
+    room = "!a1:example.invalid"
+    br.state["since"] = "old"
+    relayed, paged = [], []
+    br._to_mesh = lambda agent, body, room_id=None: relayed.append(body)
+
+    def fake_req(method, path, params=None, body=None, token=None):
+        if path.endswith("/sync"):
+            return {"next_batch": "s2", "rooms": {"join": {room: {"timeline": {
+                "limited": True, "prev_batch": "p1",
+                "events": [_pilot_event("$e3", "only the visible one")]}}}}}
+        paged.append(path)
+        return {"chunk": [], "end": None}
+
+    br._req = fake_req
+    br.send_read_receipt = lambda *a, **k: None
+    br.poll_matrix()
+    assert paged == [], "walked back through history with nothing to stop it"
+    assert relayed == ["only the visible one"]
+
+
+def test_a_gap_too_wide_to_close_is_reported(bridge_env):
+    """Never announce a partial recovery as a complete one."""
+    _mod, br, _inbox, messages = bridge_env
+    room = "!a1:example.invalid"
+    br.state["since"] = "old"
+    br.state["last_events"] = {room: "$unreachable"}
+    br.backfill_max_pages = 2
+    br._to_mesh = lambda agent, body, room_id=None: None
+
+    def fake_req(method, path, params=None, body=None, token=None):
+        if path.endswith("/sync"):
+            return {"next_batch": "s2", "rooms": {"join": {room: {"timeline": {
+                "limited": True, "prev_batch": "p1",
+                "events": [_pilot_event("$e9", "visible")]}}}}}
+        return {"chunk": [_pilot_event("$e8", "older")], "end": "more"}
+
+    br._req = fake_req
+    br.send_read_receipt = lambda *a, **k: None
+    br.poll_matrix()
+    bodies = [m[3] for m in messages()]
+    assert any("wider than the backfill limit" in b for b in bodies), bodies
+
+
+def _pilot_event(event_id, body):
+    return {"event_id": event_id, "type": "m.room.message",
+            "sender": "@pilot:example.invalid",
+            "content": {"msgtype": "m.text", "body": body}}

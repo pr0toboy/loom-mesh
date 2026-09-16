@@ -11,8 +11,12 @@
   "default_priority": "normal",
 
   "alert_agent": "supervisor",
-  "alert_from": "pilot-matrix",
-  "sync_alert_after": 20,
+  "alert_from": "bridge",
+  "sync_alert_seconds": 60,
+  "sync_alert_after": 3,
+  "hold_alert_seconds": 300,
+  "hold_skip_seconds": 3600,
+  "backfill_max_pages": 20,
 
   "agent_tokens_file": "/home/you/matrix/bridge/agent_tokens.json",
 

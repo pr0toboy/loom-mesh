@@ -314,8 +314,12 @@ In the original deployment the API listens on the VPN interface only, and nothin
 | 8 | Supervisor agent + auto-compact at 60% ctx | self-maintenance |
 | 9 | Matrix pilot peer ↔ agents | chat-as-peer |
 | 10 | Security batch (input validation, idempotency, token caching) | hardening |
+| 11 | Autonomy engine: shared board, coordinator, night window, work-drain Stop hook | agents pick up the next task without being asked |
+| 12 | Review gate: no task reaches `done` without a sign-off from the premium model tier | a second, stronger reader on every deliverable |
+| 13 | Usage guard and fleet policy | runs stop before the subscription quota does; paused agents refuse work |
+| 14 | Matrix bridge hardening: outage escalation, bounded hold, real backfill | no reply lost during a homeserver outage |
 
-Each phase took between 15 minutes and 6 hours of agent-orchestrated work. Total wall-clock spread: ~10 days.
+Phases 0–10 took between 15 minutes and 6 hours each of agent-orchestrated work, over ~10 days. Phases 11–14 came over the following three months of daily use.
 
 ## Known issues and tradeoffs
 
@@ -351,6 +355,34 @@ first hour:
 This repo is the **pattern**, plus the runtime it needs to actually run: bus,
 API, dashboard, hooks, autonomy engine, bridge. Adapt it to your machines,
 agents, and goals.
+
+## The original deployment, today
+
+This repository was extracted from a private deployment that kept running and
+kept growing. As of October 2026 it runs 23 agents across several machines. The
+screenshots below are from that deployment, with every agent renamed
+`agent-NN` — they show where the pattern goes, not what `bootstrap.sh` installs.
+
+![The original deployment's dashboard: 23 agents grouped by state, each with its context usage](docs/images/deployment-overview.png)
+
+![The same deployment's mesh graph: the user at the centre, message counts on the links](docs/images/deployment-graph.png)
+
+What it has that this repo does not ship:
+
+- **On-demand agents.** Most agents sleep after 15 minutes idle and wake when a
+  message arrives, with a hard cap of three agents working at once. The cap
+  exists because of the subscription quota, not the hardware.
+- **Two model tiers.** Every agent runs on the default tier; the premium tier is
+  switched on per task, for hard reasoning and for the end-of-phase review. The
+  gate itself *is* shipped (`autonomy/fable_gate.py`); the switching is not.
+- **Topic rooms.** Besides one Matrix room per agent, a room can be bound to a
+  subject instead: each message starts a headless, sandboxed run scoped to that
+  subject, with no permanent agent behind it. The bus already accepts
+  `topic-<slug>` senders; the runner is not here.
+- **A kanban board as the dispatch surface.** Cards are tickets: moving one
+  hands the work to an agent.
+- **More dashboard tabs.** *Skills* and *Hooks*, inventories of what is
+  installed, and *Office*, a pixel-art view of who is working.
 
 ## Reading order
 

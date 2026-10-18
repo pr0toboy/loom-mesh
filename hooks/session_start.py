@@ -142,9 +142,34 @@ def load_state(agent: str) -> dict:
 
 
 def save_state(agent: str, state: dict) -> None:
+    """Write the cursor atomically, exactly as ``bus/read.py`` ``save_state`` does.
+
+    This hook is the cursor's real writer, so a bare ``write_text`` here meant a
+    hook killed between the truncate and the write left an empty state file and
+    lost every cursor. Temp file + fsync + ``os.replace``, under a lock on the
+    stable ``state-<agent>.json.lock`` shared with ``read.py``.
+
+    Duplicated rather than loaded from ``read.py``: importing it runs its
+    ``sys.path`` insert, which the roster loader above deliberately avoids.
+    Keep the two in step. Failures are swallowed: the old cursor survives.
+    """
+    import fcntl
+
+    path = MESH_DIR / f"state-{agent}.json"
     try:
-        (MESH_DIR / f"state-{agent}.json").write_text(
-            json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        data = (json.dumps(state, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        with (MESH_DIR / f"state-{agent}.json.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            try:
+                with tmp.open("wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
+            finally:
+                tmp.unlink(missing_ok=True)
+                fcntl.flock(lock, fcntl.LOCK_UN)
     except Exception:
         pass
 

@@ -156,3 +156,32 @@ def test_the_pane_wins_over_a_wrongly_inherited_agent_name(mesh):
         assert "identity conflict" in (mesh / "err.txt").read_text()
     finally:
         subprocess.run([*tmux, "kill-server"], capture_output=True)
+
+
+# ── The cursor file survives a hook that dies mid-write ───────────────────────
+
+def _hook_save_state(mesh: Path, code: str):
+    """Run the hook's save_state in a child, with `code` executed first (a fault)."""
+    script = ("import importlib.util, os, sys\n"
+              f"spec = importlib.util.spec_from_file_location('h', {str(HOOK)!r})\n"
+              "hook = importlib.util.module_from_spec(spec); spec.loader.exec_module(hook)\n"
+              f"{code}\n"
+              "hook.save_state('bob', {'last_read': {'alice': {'ts': 'new'}}})\n")
+    return subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                          env={**os.environ, "MESH_HOME": str(mesh)})
+
+
+def test_hook_killed_before_the_rename_leaves_the_old_cursor_intact(mesh):
+    state = mesh / "state-bob.json"
+    state.write_text('{"last_read": {"alice": {"ts": "old"}}}\n')
+    r = _hook_save_state(mesh, "def boom(*a): os._exit(9)\nos.replace = boom")
+    assert r.returncode == 9
+    assert json.loads(state.read_text())["last_read"]["alice"]["ts"] == "old"
+
+
+def test_hook_writes_the_cursor_whole_under_the_shared_lock(mesh):
+    r = _hook_save_state(mesh, "")
+    assert r.returncode == 0, r.stderr
+    assert json.loads((mesh / "state-bob.json").read_text())["last_read"]["alice"]["ts"] == "new"
+    assert (mesh / "state-bob.json.lock").exists()
+    assert not list(mesh.glob(".state-bob.json.*.tmp"))

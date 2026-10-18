@@ -185,3 +185,30 @@ def test_hook_writes_the_cursor_whole_under_the_shared_lock(mesh):
     assert json.loads((mesh / "state-bob.json").read_text())["last_read"]["alice"]["ts"] == "new"
     assert (mesh / "state-bob.json.lock").exists()
     assert not list(mesh.glob(".state-bob.json.*.tmp"))
+
+
+def test_hook_save_state_waits_for_the_lock(mesh):
+    """The hook's writer must block while another holds state-bob.json.lock."""
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl, sys\n"
+         f"f = open({str(mesh / 'state-bob.json.lock')!r}, 'a+b')\n"
+         "fcntl.flock(f, fcntl.LOCK_EX); print('locked', flush=True); sys.stdin.read()\n"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        script = ("import importlib.util\n"
+                  f"spec = importlib.util.spec_from_file_location('h', {str(HOOK)!r})\n"
+                  "hook = importlib.util.module_from_spec(spec); spec.loader.exec_module(hook)\n"
+                  "hook.save_state('bob', {'last_read': {}})\n")
+        writer = subprocess.Popen([sys.executable, "-c", script],
+                                  env={**os.environ, "MESH_HOME": str(mesh)})
+        with pytest.raises(subprocess.TimeoutExpired):
+            writer.wait(timeout=2)
+        assert not (mesh / "state-bob.json").exists()
+        holder.stdin.close()
+        holder.wait(timeout=5)
+        assert writer.wait(timeout=5) == 0
+        assert (mesh / "state-bob.json").exists()
+    finally:
+        holder.kill()

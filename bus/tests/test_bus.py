@@ -861,3 +861,17 @@ def test_box_reset_sends_escape_only_before_a_slash():
     assert keys("/comp").split() == ["send-keys", "-t", "bob", "Escape",
                                       "send-keys", "-t", "bob", "C-u"]
     assert keys("[mesh] old").split() == ["send-keys", "-t", "bob", "C-u"]
+
+
+def test_a_swallowed_enter_in_a_narrow_pane_is_not_taken():
+    """A ~29-char box shows only the start of the notice: still a swallowed Enter."""
+    notice = "[mesh] new message from alice (id=cafe1234)"
+    want = notice.replace(" ", "")
+    assert len(want) > 29 + 5
+    box = want[:29]
+    r = subprocess.run(
+        ["bash", "-c", f'source "{WATCHER}"; _input_box_text() {{ printf %s "$BOX"; }}; '
+                       '_enter_took bob "$1"', "_", notice],
+        capture_output=True, text=True,
+        env={**os.environ, "BOX": box, "MESH_ENTER_CHECK_DELAY": "0"})
+    assert r.returncode == 1, "a truncated box holding our text means Enter did not take"

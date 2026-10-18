@@ -232,6 +232,35 @@ def test_reply_hint_is_shown_for_a_human_behind_a_chat_facade(mesh):
     assert "reply through the bus" in r.stdout
 
 
+# ── Bounded and third-party views ─────────────────────────────────────────────
+
+def test_tail_shows_only_the_last_messages_and_acks_nothing(mesh):
+    for i in range(5):
+        run(SEND, "alice", "bob", "normal", f"msg-{i}", mesh=mesh)
+    r = run(READ, "bob", "--tail", "2", mesh=mesh)
+    assert r.returncode == 0, r.stderr
+    assert "msg-3" in r.stdout and "msg-4" in r.stdout
+    assert "msg-2" not in r.stdout
+    assert not any(m["acked"] for m in inbox(mesh, "bob"))
+    assert not (mesh / "state-bob.json").exists(), "--tail must not move a cursor"
+
+
+def test_tail_has_a_default_and_a_ceiling(mesh):
+    run(SEND, "alice", "bob", "normal", "only", mesh=mesh)
+    assert "last 1 of 1" in run(READ, "bob", "--tail", mesh=mesh).stdout
+    assert "last 1 of 1" in run(READ, "bob", "--tail", "100000", mesh=mesh).stdout
+    assert run(READ, "bob", "--tail", "zero", mesh=mesh).returncode == 2
+
+
+def test_peer_view_drops_the_owner_hint_and_says_it_acks_nothing(mesh):
+    run(SEND, "user-web", "bob", "normal", "question", mesh=mesh)
+    r = run(READ, "bob", "--peer-view", mesh=mesh)
+    assert "question" in r.stdout
+    assert "reply through the bus" not in r.stdout, "the hint is for bob, not for a reader"
+    assert "Nothing here is acked for bob" in r.stdout
+    assert "cursor NOT advanced" not in r.stdout
+
+
 # ── The cursor file survives a writer that dies ───────────────────────────────
 
 def _save_state(mesh: Path, code: str):

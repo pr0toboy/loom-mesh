@@ -5,6 +5,8 @@ Usage:
     python3 read.py <agent>              # unread: newer than your cursor, not acked
     python3 read.py <agent> --all        # everything in the file
     python3 read.py <agent> --unacked    # everything still unacked, cursor IGNORED
+    python3 read.py <agent> --tail [N]   # the last N messages (default 20, max 200)
+    python3 read.py <agent> --peer-view  # any view above, read by someone else
     python3 read.py <agent> --ack <id> [<id> ...]
 
 Three views, because "have I dealt with this?" and "have I seen this?" are not
@@ -15,8 +17,14 @@ the same question:
   are woken by a message: the wake path advances the cursor at boot, so the
   normal view goes empty while the work is still owed. This view shows exactly
   what is still owed;
+* **--tail** is the bounded view: recent context without dumping the whole file.
+  Like the others it moves no cursor and acks nothing;
 * **--ack** is the only thing that marks a message handled. Displaying a message
   deliberately does *not*, so an interrupted session does not lose its queue.
+
+``--peer-view`` is for a third party reading an inbox that is not theirs (an
+operator, a supervising agent). It drops the "reply through the bus" hint, which
+is addressed to the inbox owner, and says that the reader acks nothing for them.
 
 Environment:
     MESH_HOME   bus directory (default ``~/mesh``)
@@ -163,6 +171,25 @@ def ack_inbox(agent: str, ids_to_ack: set[str]) -> int:
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+TAIL_DEFAULT = 20
+TAIL_MAX = 200
+
+
+def _tail_count(args: list[str]) -> int:
+    i = args.index("--tail")
+    if i + 1 < len(args) and not args[i + 1].startswith("--"):
+        try:
+            n = int(args[i + 1])
+        except ValueError:
+            print(f"error: --tail expects a number, got {args[i + 1]!r}", file=sys.stderr)
+            sys.exit(2)
+        if n < 1:
+            print("error: --tail expects a positive number", file=sys.stderr)
+            sys.exit(2)
+        return min(n, TAIL_MAX)
+    return TAIL_DEFAULT
+
+
 def show(msgs: list[dict], full: bool = False, agent: str | None = None) -> None:
     if not msgs:
         print("(no messages)")
@@ -191,7 +218,7 @@ def show(msgs: list[dict], full: bool = False, agent: str | None = None) -> None
 def main() -> None:
     if len(sys.argv) < 2 or sys.argv[1] not in AGENTS:
         known = "|".join(sorted(AGENTS)) or "<no roster: run bootstrap.sh>"
-        print(f"usage: {sys.argv[0]} <{known}> [--all|--unacked|--ack <id> ...]",
+        print(f"usage: {sys.argv[0]} <{known}> [--all|--unacked|--tail [N]] [--peer-view] | --ack <id> ...",
               file=sys.stderr)
         sys.exit(2)
 
@@ -218,15 +245,31 @@ def main() -> None:
         print(f"acked {n} message(s)")
         return
 
+    # A third party gets no reply hint (it is addressed to the owner) and is told
+    # plainly that whatever it reads stays owed by the owner.
+    peer_view = "--peer-view" in args
+    owner = None if peer_view else agent
+    if peer_view:
+        print(f"(peer view: reading inbox-{agent} as a third party. Nothing here is "
+              f"acked for {agent}; acking is the owner's call.)\n")
+
     if "--all" in args:
         print(f"=== inbox-{agent}.jsonl — {len(msgs)} message(s) total ===\n")
-        show(msgs, full=True, agent=agent)
+        show(msgs, full=True, agent=owner)
         return
 
     if "--unacked" in args:
         unacked = [m for m in msgs if not m.get("acked")]
         print(f"=== unacked in inbox-{agent} ({len(unacked)} message(s), cursor ignored) ===\n")
-        show(unacked, full=True, agent=agent)
+        show(unacked, full=True, agent=owner)
+        return
+
+    if "--tail" in args:
+        n = _tail_count(args)
+        recent = msgs[-n:]
+        print(f"=== last {len(recent)} of {len(msgs)} message(s) in inbox-{agent} "
+              f"(cursor ignored, nothing acked) ===\n")
+        show(recent, full=True, agent=owner)
         return
 
     last_read = state.get("last_read", {})
@@ -236,8 +279,8 @@ def main() -> None:
         and _is_after_cursor(m.get("ts", ""), m.get("id"), last_read.get(m.get("from")))
     ]
     print(f"=== unread in inbox-{agent} ({len(unread)} message(s)) ===\n")
-    show(unread, full=True, agent=agent)
-    if unread:
+    show(unread, full=True, agent=owner)
+    if unread and not peer_view:
         print("(cursor NOT advanced; use --ack <id> to mark messages handled)")
 
 

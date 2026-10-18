@@ -232,6 +232,34 @@ def test_reply_hint_is_shown_for_a_human_behind_a_chat_facade(mesh):
     assert "reply through the bus" in r.stdout
 
 
+# ── The optional render hook must never hold the caller ───────────────────────
+#
+# send.py and read.py --ack used to wait for render.py. The message is already on
+# disk at that point, so a slow render only made a delivered message look like a
+# failure to any caller with a timeout. A render that sleeps proves the wait is gone.
+
+_SLOW_RENDER = "import time\ntime.sleep(10)\n"
+
+
+@pytest.mark.parametrize("action", ["send", "ack"])
+def test_a_slow_render_does_not_block_the_caller(mesh, action):
+    import time
+    (mesh / "render.py").write_text(_SLOW_RENDER)
+    if action == "ack":
+        (mesh / "render.py").rename(mesh / "render.off")
+        run(SEND, "alice", "bob", "normal", "hello", mesh=mesh)
+        (mesh / "render.off").rename(mesh / "render.py")
+        args = (READ, "bob", "--ack", inbox(mesh, "bob")[0]["id"])
+    else:
+        args = (SEND, "alice", "bob", "normal", "hello")
+    t0 = time.monotonic()
+    r = run(*args, mesh=mesh)
+    elapsed = time.monotonic() - t0
+    assert r.returncode == 0, r.stderr
+    assert elapsed < 5, f"{action} waited {elapsed:.1f}s for render.py"
+    assert len(inbox(mesh, "bob")) == 1
+
+
 # ── Watcher: the predicate that decides whether to type into a session ────────
 
 def _pane_is_idle(pane_text: str) -> bool:

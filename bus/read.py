@@ -196,11 +196,15 @@ def main() -> None:
             print("error: --ack requires at least one id", file=sys.stderr)
             sys.exit(2)
         n = ack_inbox(agent, ids_to_ack)
+        # Detached, like the render after a send: the ack is already on disk,
+        # and a caller with a timeout must not see a slow render as a failed ack.
         render = MESH_DIR / "render.py"
         if render.exists():
             import subprocess
 
-            subprocess.run([sys.executable, str(render)], check=False, capture_output=True)
+            subprocess.Popen([sys.executable, str(render)], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
         print(f"acked {n} message(s)")
         return
 

@@ -266,9 +266,15 @@ def main() -> None:
 
     print(f"appended to {inbox.name}: id={msg_id} ts={ts}")
 
+    # Detached, never awaited: the message is already written and fsynced, and
+    # the rendered view is a convenience. Waiting for it made the send as slow
+    # as the render — observed: under heavy load, a caller with a timeout
+    # reported failure for a delivered message, and retried it.
     render = MESH_DIR / "render.py"
     if render.exists():
-        subprocess.run([sys.executable, str(render)], check=False, capture_output=True)
+        subprocess.Popen([sys.executable, str(render)], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
 
 
 if __name__ == "__main__":

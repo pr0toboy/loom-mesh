@@ -505,6 +505,8 @@ deployment that hits one is a deployment whose units were not written by
 | `MESH_TMUX` | `tmux` | tmux invocation, e.g. `tmux -L <socket>` |
 | `MESH_ALLOW_SHARED_TMUX` | unset | `1` lets a mesh whose home is **not** `~/mesh` drive the shared tmux server. The units `bootstrap.sh` installs set it; a clone run by hand does not, and is refused — see below |
 | `MESH_BUSY_PATTERN` / `MESH_IDLE_PATTERN` | see `bus/watcher.sh` | Idle heuristic, if your agent CLI shows something else |
+| `MESH_INPUT_PATTERN` | see `bus/watcher.sh` | Regex that finds the input box line; group 1 is the typed text |
+| `MESH_ENTER_CHECK_DELAY` | `1.5` | Seconds the watcher waits before checking that Enter submitted a push |
 | `MESH_SSH_OPTS` | batch mode, 10s timeout | Extra ssh options for pushes to remote agents |
 | `MESH_CHECK_WAIT` | `5` | Seconds `mesh-send-checked.sh` waits before reporting |
 | `MESH_BRIDGE_PEERS` / `MESH_BRIDGE_STATE` | — | Peers delivered by the chat bridge rather than the watcher, and its state file |

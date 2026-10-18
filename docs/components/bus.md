@@ -10,6 +10,8 @@ The bus is **one directory** with **a handful of scripts** acting on it:
 $MESH_HOME/
 ├── inbox-<agent>.jsonl    # one per recipient
 ├── state-<agent>.json     # one per recipient (read cursors)
+├── state-<agent>.json.lock  # stable lock for cursor writers
+├── .state-<agent>.json.<pid>.tmp  # transient: an atomic cursor write in flight
 ├── peers.py, peers.sh     # the roster, written by bootstrap.sh
 ├── roster.py              # reads whichever roster file exists
 ├── send.py                # write a message
@@ -152,6 +154,8 @@ visible and reversible.
 python3 read.py <agent>              # unread: past your cursor, not acked
 python3 read.py <agent> --all        # everything in the file
 python3 read.py <agent> --unacked    # everything unacked, cursor ignored
+python3 read.py <agent> --tail [N]   # last N messages (default 20, max 200)
+python3 read.py <agent> --peer-view  # any view above, read by a third party
 python3 read.py <agent> --ack <id>   # mark handled
 ```
 
@@ -162,6 +166,11 @@ different questions.
 - **`--unacked` ignores the cursor entirely.** It exists for agents that sleep
   and are woken by a message: the wake path advances the cursor at boot, so the
   cursor view goes empty while the work is still owed.
+- **`--tail`** is the bounded view: recent context without the whole file. It
+  moves no cursor and acks nothing.
+- **`--peer-view`** is for an operator or supervisor reading someone else's
+  inbox: it drops the hint addressed to the owner and states that nothing is
+  acked on their behalf.
 - **`--ack` is the only thing that marks a message handled.** Displaying one
   deliberately does not, so an interrupted session keeps its queue.
 
@@ -211,7 +220,13 @@ the strongest signal available — an elapsed timer (`(12s`, `1m 4s`) or an
 interrupt hint means output is being produced right now. Idle is then judged on
 the **last non-empty line**, which is where a prompt lives. Both patterns are
 overridable (`MESH_BUSY_PATTERN`, `MESH_IDLE_PATTERN`): they are the one part of
-the script that depends on which CLI the agent runs.
+the script that depends on which CLI the agent runs. The same goes for
+`MESH_INPUT_PATTERN`, which finds the input box so the watcher can read back what
+is typed there before and after a push, and `MESH_ENTER_CHECK_DELAY` (default
+`1.5` s), how long it waits before checking that Enter was taken.
+
+Cursor files are written atomically (temp file, fsync, rename) under a lock on
+`state-<agent>.json.lock`, by `read.py` and by the SessionStart hook alike.
 
 Two bugs found by running it rather than reading it, both of which made delivery
 die in silence while the log claimed the session was busy:

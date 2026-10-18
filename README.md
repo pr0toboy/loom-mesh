@@ -153,6 +153,7 @@ This mesh solves three concrete problems:
 │   │   ├── inbox-<agent>.jsonl   (one file per recipient)     │ │
 │   │   ├── tickets/<agent>/{draft,armed,queued,running,...}/  │ │
 │   │   ├── state-<agent>.json    (read cursors)               │ │
+│   │   ├── state-<agent>.json.lock (cursor write lock)        │ │
 │   │   ├── heartbeats/<agent>.json                            │ │
 │   │   └── peers.py / peers.sh   (canonical agent list)       │ │
 │   └──────────────────────────────────────────────────────────┘ │

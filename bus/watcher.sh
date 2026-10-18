@@ -221,6 +221,11 @@ capture_remote() {
 #
 # No box found (an unfamiliar CLI, a pane that scrolled) means "do not know",
 # and every caller treats that as no information rather than as an error.
+#
+# Known limit: the live box is "❯" + U+00A0 while a past user turn in the
+# transcript is "❯" + U+0020, and the pattern matches both. It relies on the
+# LAST prompt-looking line being the box, which held in every state observed
+# (permission dialogs included, whose selected line also starts with "❯").
 _INPUT_PATTERN="${MESH_INPUT_PATTERN:-}"
 [ -z "$_INPUT_PATTERN" ] && _INPUT_PATTERN='^\s*[│|]?\s*(?:❯|>|\S*[$#])\s?(.*?)\s*[│|]?\s*$'
 _ENTER_CHECK_DELAY="${MESH_ENTER_CHECK_DELAY:-1.5}"
@@ -264,7 +269,11 @@ _enter_took() {   # _enter_took <session> <text>
     want="${2//[[:space:]]/}"
     want="${want:0:40}"
     [ -z "$box" ] && return 0
-    [ "${box:0:${#want}}" = "$want" ] && return 1
+    # A narrow pane shows fewer than 40 characters on the box's first line:
+    # compare on the shorter of the two, or a swallowed Enter reads as taken.
+    local n=${#want}
+    [ "${#box}" -lt "$n" ] && n=${#box}
+    [ "${box:0:$n}" = "${want:0:$n}" ] && return 1
     return 0
 }
 

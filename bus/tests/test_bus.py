@@ -246,9 +246,13 @@ def test_tail_shows_only_the_last_messages_and_acks_nothing(mesh):
 
 
 def test_tail_has_a_default_and_a_ceiling(mesh):
-    run(SEND, "alice", "bob", "normal", "only", mesh=mesh)
-    assert "last 1 of 1" in run(READ, "bob", "--tail", mesh=mesh).stdout
-    assert "last 1 of 1" in run(READ, "bob", "--tail", "100000", mesh=mesh).stdout
+    # 250 messages: with one, "last 1 of 1" holds whatever the bounds are.
+    (mesh / "inbox-bob.jsonl").write_text("".join(
+        json.dumps({"id": f"id{i:05d}", "ts": f"2026-01-01T00:00:{i:05d}", "from": "alice",
+                    "to": "bob", "priority": "normal", "body": f"m{i}", "acked": False}) + "\n"
+        for i in range(250)))
+    assert "last 20 of 250" in run(READ, "bob", "--tail", mesh=mesh).stdout
+    assert "last 200 of 250" in run(READ, "bob", "--tail", "100000", mesh=mesh).stdout
     assert run(READ, "bob", "--tail", "zero", mesh=mesh).returncode == 2
 
 
@@ -286,6 +290,31 @@ def test_state_is_written_whole_and_locked_on_a_stable_file(mesh):
     assert r.returncode == 0, r.stderr
     assert json.loads((mesh / "state-bob.json").read_text())["last_read"]["alice"]["ts"] == "new"
     assert (mesh / "state-bob.json.lock").exists()
+
+
+def test_save_state_waits_for_the_lock(mesh):
+    """A writer must block while another holds state-bob.json.lock."""
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl, sys\n"
+         f"f = open({str(mesh / 'state-bob.json.lock')!r}, 'a+b')\n"
+         "fcntl.flock(f, fcntl.LOCK_EX); print('locked', flush=True); sys.stdin.read()\n"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        script = (f"import sys; sys.path.insert(0, {str(BUS)!r}); import read\n"
+                  "read.save_state('bob', {'last_read': {}})\n")
+        writer = subprocess.Popen([sys.executable, "-c", script],
+                                  env={**os.environ, "MESH_HOME": str(mesh)})
+        with pytest.raises(subprocess.TimeoutExpired):
+            writer.wait(timeout=2)
+        assert not (mesh / "state-bob.json").exists()
+        holder.stdin.close()
+        holder.wait(timeout=5)
+        assert writer.wait(timeout=5) == 0
+        assert (mesh / "state-bob.json").exists()
+    finally:
+        holder.kill()
 
 
 # ── The optional render hook must never hold the caller ───────────────────────

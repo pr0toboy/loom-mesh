@@ -31,6 +31,8 @@
 #   MESH_HOME     bus directory (default ~/mesh)
 #   MESH_TMUX     tmux binary or socket invocation (default "tmux")
 #   MESH_SSH_OPTS extra ssh options (default: batch mode, 10s connect timeout)
+#   MESH_INPUT_PATTERN  Python regex for the input-box line; group 1 = its text
+#   MESH_ENTER_CHECK_DELAY  seconds before checking that Enter was taken (1.5)
 #
 # Exit: runs until killed. systemd restarts it; inotify state does not survive,
 # which is fine — messages missed while it was down are read on the next pull.
@@ -211,6 +213,61 @@ capture_remote() {
     ssh "${SSH_OPTS[@]}" "$1" "tmux capture-pane -p -t $(printf '%q' "$2") 2>/dev/null | grep . | tail -6" 2>/dev/null
 }
 
+# ── The input box ─────────────────────────────────────────────────────────────
+# What is currently typed at the prompt, read back from the pane: the LAST line
+# that looks like a prompt, minus the prompt itself. Used to check three things
+# a blind send-keys cannot: that a human is not halfway through typing, that the
+# box can be cleared safely, and that Enter actually submitted the notice.
+#
+# No box found (an unfamiliar CLI, a pane that scrolled) means "do not know",
+# and every caller treats that as no information rather than as an error.
+_INPUT_PATTERN="${MESH_INPUT_PATTERN:-}"
+[ -z "$_INPUT_PATTERN" ] && _INPUT_PATTERN='^\s*[│|]?\s*(?:❯|>|\S*[$#])\s?(.*?)\s*[│|]?\s*$'
+_ENTER_CHECK_DELAY="${MESH_ENTER_CHECK_DELAY:-1.5}"
+
+_input_box_text() {   # _input_box_text <session>; rc 1 = no box found
+    local pane
+    pane="$(timeout 5 $TMUX_BIN capture-pane -p -t "$1" 2>/dev/null)" || return 1
+    python3 -c '
+import re, sys
+pat = re.compile(sys.argv[1])
+for line in reversed([l for l in sys.stdin.read().splitlines() if l.strip()]):
+    m = pat.match(line)
+    if m:
+        print(m.group(1).strip() if m.groups() else "")
+        sys.exit(0)
+sys.exit(1)' "$_INPUT_PATTERN" <<< "$pane" 2>/dev/null
+}
+
+# Clearing the box. A box that starts with "/" has the slash-command menu open,
+# and that menu swallows C-u: Escape closes it first. Escape is NOT sent on
+# ordinary text, where a second Escape opens the history rewind instead.
+# push_local refuses a box that is not ours before getting here, so today this
+# only matters to a caller that clears a box it has already classified.
+_box_reset() {   # _box_reset <session> <current box text>
+    if [ "${2:0:1}" = "/" ]; then
+        timeout 5 $TMUX_BIN send-keys -t "$1" Escape 2>/dev/null
+        sleep 0.2
+    fi
+    timeout 5 $TMUX_BIN send-keys -t "$1" C-u 2>/dev/null
+}
+
+# Did Enter submit? If the box still holds the start of what was typed, the
+# keystroke was swallowed (a redraw, a modal) and "push OK" would be a lie.
+# Compared without whitespace, on the first 40 characters: the box wraps and
+# pads the text it shows. No box = nothing to conclude, so success.
+_enter_took() {   # _enter_took <session> <text>
+    local box want
+    sleep "$_ENTER_CHECK_DELAY"
+    box="$(_input_box_text "$1")" || return 0
+    box="${box//[[:space:]]/}"
+    want="${2//[[:space:]]/}"
+    want="${want:0:40}"
+    [ -z "$box" ] && return 0
+    [ "${box:0:${#want}}" = "$want" ] && return 1
+    return 0
+}
+
 # ── Injection ─────────────────────────────────────────────────────────────────
 # Strip control characters and newlines from anything that goes through
 # send-keys. Keystrokes are not a data channel: a newline in the middle would
@@ -227,8 +284,10 @@ build_notice() {   # build_notice <from> <to> <id>
         "$from" "$id" "$MESH_DIR" "$to" "$MESH_DIR" "$to" "$id" | _sanitize
 }
 
+# push_local returns 0 on a submitted notice, 1 when tmux failed, 3 when a
+# human has text in the box (nothing typed), 4 when Enter was not taken twice.
 push_local() {   # push_local <session> <text>
-    local session="$1" text="$2"
+    local session="$1" text="$2" box=""
     # Last-resort guard, here rather than only at startup: this is the function
     # that presses Enter, and it is reachable by sourcing this file.
     if ! _tmux_scope_is_consistent; then
@@ -236,15 +295,25 @@ push_local() {   # push_local <session> <text>
         return 1
     fi
     $TMUX_BIN has-session -t "$session" 2>/dev/null || return 1
+    # Never overwrite someone's typing: C-u below would erase it. A box holding
+    # one of our own earlier notices is fair game.
+    if box="$(_input_box_text "$session")" && [ -n "$box" ] && [ "${box#\[mesh\]}" = "$box" ]; then
+        return 3
+    fi
     # -l sends the text literally: without it tmux reads words like "Enter" or
     # "C-c" inside the message as key names. Enter is then sent as its own key,
     # so the body can never submit itself. Each call is bounded: one wedged
     # send-keys once froze delivery for the whole mesh, not just this message.
-    timeout 5 $TMUX_BIN send-keys -t "$session" C-u 2>/dev/null
+    _box_reset "$session" "$box"
     timeout 5 $TMUX_BIN send-keys -t "$session" -l "$text" 2>/dev/null || return 1
     sleep 0.4
     timeout 5 $TMUX_BIN send-keys -t "$session" Enter 2>/dev/null || return 1
-    return 0
+    _enter_took "$session" "$text" && return 0
+    # One retry: a single swallowed Enter is common, two in a row is a state
+    # this function cannot read, and is reported rather than guessed through.
+    timeout 5 $TMUX_BIN send-keys -t "$session" Enter 2>/dev/null || return 1
+    _enter_took "$session" "$text" && return 0
+    return 4
 }
 
 # The SSH branch had NO scope check at all, found by the 2026-09-09 gate: I had
@@ -278,6 +347,9 @@ push_remote() {   # push_remote <ssh-target> <session> <text>
     # gibberish. The notice is plain ASCII for that reason; this keeps it true
     # even when the caller's locale is not.
     local LC_ALL=C.UTF-8
+    # Known limit: the input-box checks of push_local (human typing, Escape on
+    # a slash menu, Enter taken) are not done over SSH yet. A remote push can
+    # still report OK for an Enter the remote pane swallowed.
     ssh "${SSH_OPTS[@]}" "$target" \
         "tmux has-session -t $(printf '%q' "$session") 2>/dev/null" || return 1
     ssh "${SSH_OPTS[@]}" "$target" \
@@ -321,11 +393,14 @@ try_push() {   # try_push <to> <from> <id>
         log "skip push (busy or no session) -> $to id=$id"
         return 2
     fi
-    if push_local "$session" "$text"; then
-        log "push local OK -> $to id=$id"
-        return 0
-    fi
-    log "skip push (send-keys failed) -> $to id=$id"
+    local rc=0
+    push_local "$session" "$text" || rc=$?
+    case "$rc" in
+        0) log "push local OK -> $to id=$id"; return 0 ;;
+        3) log "skip push (input box has text) -> $to id=$id" ;;
+        4) log "push local FAILED (Enter not taken, notice left in the box) -> $to id=$id" ;;
+        *) log "skip push (send-keys failed) -> $to id=$id" ;;
+    esac
     return 2
 }
 

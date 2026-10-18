@@ -751,3 +751,84 @@ def test_a_bench_with_its_own_socket_may_type_into_it(tmp_path):
 
     assert rc == 0, f"an explicit socket must be accepted: {log!r}"
     assert "send-keys" in tmux_calls, f"nothing typed on the bench socket: {tmux_calls!r}"
+
+
+# ── Watcher: reading the input box back ───────────────────────────────────────
+#
+# send-keys is blind: it cannot tell a swallowed Enter from a submitted one, and
+# its C-u erases whatever a human was typing. The fake below keeps a box: -l
+# appends to it, C-u and Enter clear it (unless FAKE_SWALLOW_ENTER is set), and
+# capture-pane draws it after a prompt, so push_local can read it back.
+
+_FAKE_TMUX_BOX = r'''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_TMUX_LOG"
+box="$FAKE_TMUX_BOX"
+case "$1" in
+  has-session) exit 0 ;;
+  capture-pane) printf 'some output\n\xe2\x9d\xaf %s\n\n' "$(cat "$box" 2>/dev/null)"; exit 0 ;;
+  send-keys)
+    shift 3                      # -t <session>
+    if [ "$1" = "-l" ]; then printf '%s' "$2" >> "$box"
+    elif [ "$1" = "C-u" ]; then : > "$box"
+    elif [ "$1" = "Enter" ] && [ -z "${FAKE_SWALLOW_ENTER:-}" ]; then : > "$box"
+    fi ;;
+esac
+exit 0
+'''
+
+
+def _push_with_box(tmp_path: Path, box_text: str, **env_extra: str) -> tuple[int, list[str], str]:
+    home = tmp_path / "home"
+    mesh = home / "mesh"; (mesh / "logs").mkdir(parents=True, exist_ok=True)
+    fake_dir = tmp_path / "bin"; fake_dir.mkdir(exist_ok=True)
+    fake = fake_dir / "tmux"; fake.write_text(_FAKE_TMUX_BOX); fake.chmod(0o755)
+    calls = tmp_path / "calls.log"; calls.write_text("")
+    box = tmp_path / "box"; box.write_text(box_text)
+    env = {**os.environ, "HOME": str(home), "MESH_HOME": str(mesh),
+           "PATH": f"{fake_dir}:{os.environ['PATH']}", "FAKE_TMUX_LOG": str(calls),
+           "FAKE_TMUX_BOX": str(box), "MESH_ENTER_CHECK_DELAY": "0", **env_extra}
+    env.pop("MESH_TMUX", None)
+    r = subprocess.run(
+        ["bash", "-c", f'source "{WATCHER}"; push_local bob "[mesh] new message from alice (id=cafe1234)"'],
+        capture_output=True, text=True, env=env)
+    return r.returncode, calls.read_text().splitlines(), box.read_text()
+
+
+def test_a_submitted_notice_is_reported_as_delivered(tmp_path):
+    """The control: an Enter that takes leaves an empty box and returns 0."""
+    rc, calls, box = _push_with_box(tmp_path, "")
+    assert rc == 0, calls
+    assert box == ""
+    assert sum(c.endswith("Enter") for c in calls) == 1, calls
+
+
+def test_a_swallowed_enter_is_retried_once_then_reported(tmp_path):
+    rc, calls, box = _push_with_box(tmp_path, "", FAKE_SWALLOW_ENTER="1")
+    assert rc == 4, "an Enter that did not take must not be reported as delivered"
+    assert sum(c.endswith("Enter") for c in calls) == 2, calls
+    assert box.startswith("[mesh]")
+
+
+def test_text_a_human_is_typing_is_never_cleared(tmp_path):
+    rc, calls, box = _push_with_box(tmp_path, "half a sentence")
+    assert rc == 3
+    assert box == "half a sentence"
+    assert not any(" C-u" in c or " -l " in c for c in calls), calls
+
+
+def test_an_earlier_mesh_notice_in_the_box_is_replaced(tmp_path):
+    rc, calls, box = _push_with_box(tmp_path, "[mesh] new message from bob (id=0000)")
+    assert rc == 0, calls
+    assert not any(c.endswith("Escape") for c in calls), "no Escape on ordinary text"
+
+
+def test_box_reset_sends_escape_only_before_a_slash():
+    def keys(box: str) -> str:
+        r = subprocess.run(
+            ["bash", "-c", f'source "{WATCHER}"; _box_reset bob "$1"', "_", box],
+            capture_output=True, text=True,
+            env={**os.environ, "MESH_TMUX": "echo"})
+        return r.stdout
+    assert keys("/comp").split() == ["send-keys", "-t", "bob", "Escape",
+                                      "send-keys", "-t", "bob", "C-u"]
+    assert keys("[mesh] old").split() == ["send-keys", "-t", "bob", "C-u"]

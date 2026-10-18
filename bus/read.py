@@ -93,19 +93,29 @@ def load_state(agent: str) -> dict:
 
 
 def save_state(agent: str, state: dict) -> None:
+    """Write the cursor file atomically: a temp file, fsync, then rename.
+
+    Truncating in place meant a writer killed between the truncate and the
+    write left an empty state file, and every cursor was lost with it.
+
+    The lock lives on a separate, stable ``.lock`` file. Locking the state file
+    itself does not survive the rename: the lock stays on the old inode, the
+    next writer locks the new one, and the two no longer exclude each other.
+    """
     path = MESH_DIR / f"state-{agent}.json"
     data = (json.dumps(state, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-    mode = "r+b" if path.exists() else "w+b"
-    with path.open(mode) as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+    with (MESH_DIR / f"state-{agent}.json.lock").open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         try:
-            f.seek(0)
-            f.truncate()
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
+            with tmp.open("wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
         finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+            tmp.unlink(missing_ok=True)
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def ack_inbox(agent: str, ids_to_ack: set[str]) -> int:

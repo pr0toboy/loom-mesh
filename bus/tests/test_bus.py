@@ -232,6 +232,33 @@ def test_reply_hint_is_shown_for_a_human_behind_a_chat_facade(mesh):
     assert "reply through the bus" in r.stdout
 
 
+# ── The cursor file survives a writer that dies ───────────────────────────────
+
+def _save_state(mesh: Path, code: str):
+    """Run read.save_state in a child, with `code` executed first (a fault)."""
+    script = (f"import sys, os; sys.path.insert(0, {str(BUS)!r}); import read\n"
+              f"{code}\n"
+              "read.save_state('bob', {'last_read': {'alice': {'ts': 'new'}}})\n")
+    return subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                          env={**os.environ, "MESH_HOME": str(mesh)})
+
+
+def test_a_writer_dying_before_the_rename_leaves_the_old_state_intact(mesh):
+    state = mesh / "state-bob.json"
+    state.write_text('{"last_read": {"alice": {"ts": "old"}}}\n')
+    r = _save_state(mesh, "def boom(*a): raise SystemExit(9)\nos.replace = boom")
+    assert r.returncode == 9
+    assert json.loads(state.read_text())["last_read"]["alice"]["ts"] == "old"
+    assert not list(mesh.glob(".state-bob.json.*.tmp")), "the temp file was left behind"
+
+
+def test_state_is_written_whole_and_locked_on_a_stable_file(mesh):
+    r = _save_state(mesh, "")
+    assert r.returncode == 0, r.stderr
+    assert json.loads((mesh / "state-bob.json").read_text())["last_read"]["alice"]["ts"] == "new"
+    assert (mesh / "state-bob.json.lock").exists()
+
+
 # ── The optional render hook must never hold the caller ───────────────────────
 #
 # send.py and read.py --ack used to wait for render.py. The message is already on

@@ -920,3 +920,25 @@ def test_a_system_peer_is_refused_as_a_recipient(tmp_path):
     ok = sp.run([sys.executable, str(bus / "send.py"), "bridge", "agent-1",
                  "high", "outage"], capture_output=True, text=True, env=env)
     assert ok.returncode == 0, ok.stderr   # ... but it remains a valid sender
+
+
+def test_an_unchanged_state_is_not_rewritten(bridge_env):
+    """The loop saves every cycle; an identical state must not touch the disk."""
+    _mod, br, _inbox, _messages = bridge_env
+    br._save_state()
+    first = br.state_file.stat().st_mtime_ns
+    time.sleep(0.01)
+    br._save_state()
+    assert br.state_file.stat().st_mtime_ns == first, "identical state was rewritten"
+    br.state["inbox_offset"] = br.state.get("inbox_offset", 0) + 1
+    br._save_state()
+    assert json.loads(br.state_file.read_text())["inbox_offset"] == br.state["inbox_offset"]
+
+
+def test_a_removed_state_file_is_written_again(bridge_env):
+    """Skipping identical writes must not leave a deleted state file missing."""
+    _mod, br, _inbox, _messages = bridge_env
+    br._save_state()
+    br.state_file.unlink()
+    br._save_state()
+    assert br.state_file.exists(), "a stable state was never written back"

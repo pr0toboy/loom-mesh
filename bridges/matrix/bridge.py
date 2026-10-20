@@ -135,9 +135,17 @@ class Bridge:
         return {"since": None, "inbox_offset": offset}
 
     def _save_state(self):
+        # The loop calls this every cycle. Rewriting an unchanged state (several
+        # hundred KB once the relayed-id lists fill up) cost an SD-card host
+        # tens of GB of writes a week; only write what changed. A state file
+        # removed by hand is still rewritten, so a restart never cold-starts.
+        data = json.dumps(self.state)
+        if data == getattr(self, "_saved_state", None) and self.state_file.exists():
+            return
         tmp = self.state_file.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(self.state))
+        tmp.write_text(data)
         tmp.replace(self.state_file)
+        self._saved_state = data
 
     # ---- HTTP Matrix -------------------------------------------------------
     def _req(self, method, path, params=None, body=None, token=None):

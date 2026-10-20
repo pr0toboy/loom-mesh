@@ -63,7 +63,7 @@ bridges/matrix/
 ├── agent_tokens.example.json  # per-agent access tokens             → copy to agent_tokens.json
 ├── matrix-bridge.service      # systemd --user unit
 ├── hooks/
-│   ├── matrix-typing-pretool.py   # PreToolUse: "<agent> is typing…"
+│   ├── matrix-typing-pretool.py   # PreToolUse + Stop: "<agent> is typing…" for the whole turn
 │   └── mesh-inbox-drain-stop.py   # Stop: never finish a turn with mail pending
 └── tests/
     └── test_bridge_outage.py      # what happens when the homeserver is unreachable
@@ -75,9 +75,11 @@ bridges/matrix/
 
 Two small Claude Code hooks make the agent side feel like a real chat. Both are pure stdlib, fail-open, and wired through `settings.json`. They are optional — the bridge works without them.
 
-### Typing indicator — `bridges/matrix/hooks/matrix-typing-pretool.py` (PreToolUse)
+### Typing indicator — `bridges/matrix/hooks/matrix-typing-pretool.py` (PreToolUse + Stop)
 
-Before each tool call, the agent refreshes a Matrix typing notification (30 s timeout) in its room, under its own identity. Element then shows "<Agent> is typing…" the whole time the agent is working — the cheap, structural answer to the pilot's "is it doing anything?". It costs **zero LLM tokens** (the hook is a plain HTTP POST, not the model) and never blocks or delays a tool: any error exits 0.
+Before each tool call, the agent refreshes a Matrix typing notification (30 s timeout) in its room, under its own identity. Element then shows "<Agent> is typing…" the whole time the agent is working — the cheap, structural answer to the pilot's "is it doing anything?". It costs **zero LLM tokens** (the hook is a plain HTTP call, not the model) and never blocks or delays a tool: any error exits 0.
+
+A 30 s notification alone lapses during one long tool call (a multi-minute test run), and the pilot reads the silence as a stuck agent. So the first tool call of a turn also starts a small detached keeper that re-sends the typing every 20 s. Wired under Stop with the `stop` argument, the same script ends the keeper and clears the indicator as soon as the turn ends. Without the Stop entry — or when a turn is interrupted, which fires no Stop hook — the keeper still exits on its own: when the agent's `claude` process is gone, after 15 min with no new tool call, or after 3 h.
 
 ```jsonc
 // settings.json
@@ -85,6 +87,11 @@ Before each tool call, the agent refreshes a Matrix typing notification (30 s ti
   { "matcher": "Edit|Write|Bash|Read|Grep|Glob|Task|WebFetch|NotebookEdit",
     "hooks": [{ "type": "command",
                 "command": "python3 .../hooks/matrix-typing-pretool.py",
+                "timeout": 5 }] }
+],
+"Stop": [
+  { "hooks": [{ "type": "command",
+                "command": "python3 .../hooks/matrix-typing-pretool.py stop",
                 "timeout": 5 }] }
 ]
 ```

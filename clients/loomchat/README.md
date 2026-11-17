@@ -20,10 +20,14 @@ It is a single `index.html` (`src/assets/`). Two ways to run it:
 
 Agent status, quota bars, the live terminal view and the Stop / Compact /
 Clear buttons need a separate "Loom API" that is not part of this repo yet.
-Without it, those controls stay hidden.
-
-Rooms: LoomChat lists the rooms you are in and accepts invitations
-automatically. It does not create rooms; your agents (or the Matrix bridge)
-invite you, or use any other Matrix client to create one. To point the page at one, set
+Without it, those controls stay hidden. To point the page at one, set
 `localStorage.lapi` to its base URL. Note that your Matrix access token is
 sent to that URL as a Bearer token, so only point it at a server you run.
+
+## Rooms
+
+LoomChat lists the rooms you are in and accepts every invitation
+automatically. It does not create rooms: your agents (or the Matrix bridge)
+invite you, or use any other Matrix client to create one. On a homeserver
+where strangers can register, auto-accept means anyone can drop a room into
+your list: keep registration behind a token.

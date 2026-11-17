@@ -70,6 +70,7 @@ button.tag{border:0;font-family:inherit;cursor:pointer;line-height:1.4}
 .quota{gap:4px!important}.qrow{display:flex;align-items:center;gap:6px}.ql{width:16px;text-align:right}.qrow .qbar{width:70px;height:6px}.qrow .num{width:30px;text-align:right}
 #vChat .acts{gap:4px;padding:6px 8px 0}#vChat .acts button{flex:1 1 0;min-width:0;flex-direction:column;gap:2px;padding:4px 0;min-height:48px;font-size:12px;border-radius:12px}
 .nolapi #bTerm,.nolapi #quota,.nolapi #cTag,.nolapi .acts button[data-t^="!cmd"]{display:none!important}
+[hidden]{display:none!important}
 </style></head><body>
 
 <section id="vLogin" class="view">
@@ -79,7 +80,9 @@ button.tag{border:0;font-family:inherit;cursor:pointer;line-height:1.4}
   <input id="lHs" placeholder="Homeserver (blank = this server)" autocomplete="url" autocapitalize="none" inputmode="url">
   <input id="lUser" placeholder="Username" autocomplete="username" autocapitalize="none" required>
   <input id="lPass" type="password" placeholder="Password" autocomplete="current-password" required>
+  <input id="lTok" placeholder="Registration token" autocomplete="off" autocapitalize="none" hidden>
   <button id="lBtn">Sign in</button>
+  <p><a href="#" id="lMode" style="color:var(--me)">Create an account</a></p>
   <p id="lErr" style="color:#ffb4b4"></p>
  </form>
 </section>
@@ -98,7 +101,7 @@ button.tag{border:0;font-family:inherit;cursor:pointer;line-height:1.4}
  <div class="ctxstrip" id="cCtx"></div><div class="noterow"><button class="cnote empty" id="cNote">📝 Add a note</button><button class="freeb" id="bFree">Free</button></div>
  <div class="err" id="eChat"></div>
  <div class="msgs" id="msgs"></div>
- <div class="acts"><button data-t="go"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Go</button><button data-t="TLDR"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h10M4 18h7"/></svg>TLDR</button><button data-t="Jalon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>Milestone</button><button data-t="!cmd ESC"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>Stop</button>
+ <div class="acts"><button data-t="go"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Go</button><button data-t="TLDR"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h10M4 18h7"/></svg>TLDR</button><button data-t="Milestone"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>Milestone</button><button data-t="!cmd ESC"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>Stop</button>
  <button data-t="!cmd /compact" data-c="Compact this agent's context?"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>Compact</button>
  <button data-t="!cmd /clear" data-c="Clear this agent's context?"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>Clear</button></div>
  <div class="in">
@@ -164,16 +167,27 @@ async function avatarInto(el,room){
 }
 
 /* ---------- login ---------- */
+let REG=false;
+$('lMode').onclick=e=>{e.preventDefault();REG=!REG;$('lTok').hidden=!REG;$('lTok').required=REG;$('lBtn').textContent=REG?'Create account':'Sign in';$('lMode').textContent=REG?'I already have an account':'Create an account';};
+async function jpost(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  let j;try{j=await r.json();}catch(e){throw new Error('No Matrix server at this address (check the URL, including https://)');}return [r,j];}
 $('fLogin').onsubmit=async e=>{
   e.preventDefault();$('lErr').textContent='';$('lBtn').disabled=true;
   try{
-    const hs=$('lHs').value.trim().replace(/\/+$/,'');if(hs){HS=hs;try{localStorage.setItem('hs',hs)}catch(e){}}
-    if(!HS)throw new Error('Enter your homeserver URL');
-    const r=await fetch(HS+'/_matrix/client/v3/login',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({type:'m.login.password',identifier:{type:'m.id.user',user:$('lUser').value.trim()},password:$('lPass').value,initial_device_display_name:'LoomChat'})});
-    const j=await r.json();if(!r.ok)throw new Error(j.error||'Login failed');
-    S.token=j.access_token;S.user=j.user_id;
-    try{localStorage.setItem('tok',S.token);localStorage.setItem('uid',S.user);}catch(e){}
+    const typed=$('lHs').value.trim().replace(/\/+$/,'');
+    if(typed&&!/^https?:\/\/[^\s/]+/.test(typed))throw new Error('Homeserver must start with https:// (or http://)');
+    const hs=typed||(location.protocol.startsWith('http')?location.origin:'');
+    if(!hs)throw new Error('Enter your homeserver URL');
+    const user=$('lUser').value.trim(),password=$('lPass').value;let r,j;
+    if(REG){
+      [r,j]=await jpost(hs+'/_matrix/client/v3/register',{username:user,password,initial_device_display_name:'LoomChat'});
+      if(r.status===401&&j.session)[r,j]=await jpost(hs+'/_matrix/client/v3/register',{username:user,password,initial_device_display_name:'LoomChat',auth:{type:'m.login.registration_token',token:$('lTok').value.trim(),session:j.session}});
+    }else{
+      [r,j]=await jpost(hs+'/_matrix/client/v3/login',{type:'m.login.password',identifier:{type:'m.id.user',user},password,initial_device_display_name:'LoomChat'});
+    }
+    if(!r.ok||!j.access_token)throw new Error(j.error||(REG?'Registration failed':'Login failed'));
+    HS=hs;S.token=j.access_token;S.user=j.user_id;
+    try{localStorage.setItem('tok',S.token);localStorage.setItem('uid',S.user);if(typed)localStorage.setItem('hs',hs);else localStorage.removeItem('hs');}catch(e){}
     $('lPass').value='';start();
   }catch(err){$('lErr').textContent=err.message;}finally{$('lBtn').disabled=false;}
 };
@@ -212,6 +226,8 @@ function ingest(j){
       if(ev.type==='m.receipt'){R.reads=R.reads||{};for(const [eid,rc] of Object.entries(ev.content))for(const u of Object.keys((rc['m.read']||{}))){if(u!==S.user)R.reads[u]=eid;}}}
   }
   for(const id of Object.keys((j.rooms&&j.rooms.leave)||{}))delete S.rooms[id];
+  /* Accept invitations automatically: agents (and the bridge) open rooms by inviting you. */
+  for(const id of Object.keys((j.rooms&&j.rooms.invite)||{}))api('POST',`/_matrix/client/v3/join/${encodeURIComponent(id)}`,{}).catch(()=>{});
 }
 function roomName(R){
   if(R.name)return R.name;
@@ -228,7 +244,7 @@ async function syncLoop(){
       $('eList').style.display='none';$('eChat').style.display='none';
       renderList();if(S.cur){renderChat();paintNote();}
     }catch(e){
-      if(g!==GEN)break;for(const x of ['eList','eChat']){$(x).textContent=(/fetch|network|abort|timed? ?out/i.test(e.message+e.name)?'No connection to Loom (check Tailscale) — retrying…':'Offline — retrying… ('+e.message+')');$(x).style.display='block';}
+      if(g!==GEN)break;for(const x of ['eList','eChat']){$(x).textContent=(/fetch|network|abort|timed? ?out/i.test(e.message+e.name)?'No connection to the homeserver — retrying…':'Offline — retrying… ('+e.message+')');$(x).style.display='block';}
       await new Promise(r=>setTimeout(r,5000));
     }
   }
@@ -372,7 +388,7 @@ new ResizeObserver(()=>{if(S.cur&&wasBottom)$('msgs').scrollTop=1e9;}).observe($
 for(const b of document.querySelectorAll('.acts button'))b.onclick=async()=>{if(b.dataset.t==='!cmd ESC'&&(AG[S.cur]||{}).state==='asleep'){$('eChat').textContent='This agent is asleep: nothing to stop.';$('eChat').style.display='block';setTimeout(()=>$('eChat').style.display='none',3000);return;}if(b.dataset.c&&!(await ask(b.dataset.c)))return;sendContent({msgtype:'m.text',body:b.dataset.t}).catch(()=>{});};
 $('bLater').onclick=toggleLater;$('cNote').onclick=editNote;$('bFree').onclick=toggleFree;$('cTag').onclick=editProj;
 
-/* ---------- Loom API (Pi): quota, agent status, terminal ---------- */
+/* ---------- optional Loom API: quota, agent status, terminal ---------- */
 /* Optional Loom API (quota, agent status, terminal, !cmd). Empty = those features stay hidden. */
 let LAPI='';try{LAPI=localStorage.getItem('lapi')||''}catch(e){}
 if(!LAPI)document.documentElement.classList.add('nolapi');

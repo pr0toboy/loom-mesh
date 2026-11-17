@@ -7,12 +7,15 @@
 ## Run:
 ##   cp .env.chat.example .env.chat   # then set LOOM_REG_TOKEN
 ##   docker compose -f docker-compose.chat.yml --env-file .env.chat up -d
-##   open http://localhost:8080 , create accounts with the registration token
+##   open http://localhost:8080 , tap "Create an account", enter the token
+##   (the FIRST account created becomes the Conduit server admin)
 ##
 ## Wire your mesh to it: point bridges/matrix/config.json at
 ## http://localhost:6167 (or the loomchat URL) and give each agent a Matrix
 ## account. The Android app (clients/loomchat/build.sh) talks to the same
 ## server: enter its public HTTPS URL at login.
+##
+## Ports: set LOOM_HS_PORT / LOOM_CHAT_PORT if 6167 or 8080 are already taken.
 ##
 ## Not exposed to the internet by default: both ports bind to 127.0.0.1.
 ## Put a TLS reverse proxy (or Tailscale serve) in front before you open it up.

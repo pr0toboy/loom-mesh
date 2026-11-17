@@ -6,8 +6,12 @@ agent, rooms waiting for your answer at the top, quick replies, notes and a
 
 It is a single `index.html` (`src/assets/`). Two ways to run it:
 
-- **Web**: `docker compose -f docker-compose.chat.yml up -d` at the repo root
-  serves it next to a Conduit homeserver (see the comments in that file).
+- **Web**: at the repo root,
+  `cp .env.chat.example .env.chat` (set `LOOM_REG_TOKEN`), then
+  `docker compose -f docker-compose.chat.yml --env-file .env.chat up -d`
+  serves it next to a Conduit homeserver. Open the page, tap "Create an
+  account" and enter the registration token. The first account created
+  becomes the Conduit server admin.
 - **Android**: `ANDROID_SDK=/path/to/sdk ./build.sh` builds a signed APK
   without Gradle (needs platform 34 and build-tools 35.0.0). The app is a
   WebView around the same page; enter your homeserver's HTTPS URL at login.
@@ -16,5 +20,10 @@ It is a single `index.html` (`src/assets/`). Two ways to run it:
 
 Agent status, quota bars, the live terminal view and the Stop / Compact /
 Clear buttons need a separate "Loom API" that is not part of this repo yet.
-Without it, those controls stay hidden. To point the page at one, set
-`localStorage.lapi` to its base URL.
+Without it, those controls stay hidden.
+
+Rooms: LoomChat lists the rooms you are in and accepts invitations
+automatically. It does not create rooms; your agents (or the Matrix bridge)
+invite you, or use any other Matrix client to create one. To point the page at one, set
+`localStorage.lapi` to its base URL. Note that your Matrix access token is
+sent to that URL as a Bearer token, so only point it at a server you run.

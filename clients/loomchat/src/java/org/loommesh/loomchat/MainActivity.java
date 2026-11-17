@@ -74,6 +74,8 @@ public class MainActivity extends Activity {
             }
             org.json.JSONArray files = new org.json.JSONArray();
             for (Uri u : uris) {
+                // Only content:// from other apps: a file:// URI could point at our own private files.
+                if (u == null || !"content".equals(u.getScheme())) continue;
                 String name = "file", mime = getContentResolver().getType(u);
                 try (android.database.Cursor c = getContentResolver().query(u, new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
                     if (c != null && c.moveToFirst()) name = c.getString(0);
@@ -81,7 +83,11 @@ public class MainActivity extends Activity {
                 byte[] data;
                 try (java.io.InputStream in = getContentResolver().openInputStream(u)) {
                     if (in == null) continue;
-                    data = in.readAllBytes();
+                    // Read at most cap + 1 bytes (manual loop: readNBytes needs API 33, minSdk is 26).
+                    java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[65536]; int n, cap = 50 * 1024 * 1024 + 1;
+                    while (bo.size() < cap && (n = in.read(buf, 0, Math.min(buf.length, cap - bo.size()))) > 0) bo.write(buf, 0, n);
+                    data = bo.toByteArray();
                 }
                 if (data.length > 50 * 1024 * 1024) continue;   // 50 MB cap
                 files.put(new org.json.JSONObject().put("name", name).put("mime", mime == null ? "" : mime)

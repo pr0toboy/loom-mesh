@@ -3,11 +3,12 @@
 # A signing key is generated in keys/ on first run (git-ignored).
 #: aapt2 -> javac -> d8 -> zipalign -> apksigner
 set -euo pipefail
+umask 077   # the signing key and its password must not be readable by other users
 ICI=$(cd "$(dirname "$0")" && pwd)
 VERSION_CODE=1
 VERSION_NAME=0.1.0
 SDK="${ANDROID_SDK:-$HOME/android-sdk}"
-export PATH="$SDK/build-tools/35.0.0:$PATH"
+export PATH="$PATH:$SDK/build-tools/35.0.0"   # system aapt2/zipalign win if present (ARM hosts)
 JAR="$SDK/platforms/android-34/android.jar"
 BT="$SDK/build-tools/35.0.0/lib"
 OUT="$ICI/build"; T="$OUT/tmp"; CLE="$ICI/keys/loomchat.p12"

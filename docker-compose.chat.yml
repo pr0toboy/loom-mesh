@@ -1,0 +1,50 @@
+## LoomChat + a Matrix homeserver
+##
+## Two containers:
+##   - homeserver : Conduit, a single-binary Matrix server (data in a named volume)
+##   - loomchat   : nginx serving the LoomChat web client and proxying /_matrix
+##
+## Run:
+##   cp .env.chat.example .env.chat   # then set LOOM_REG_TOKEN
+##   docker compose -f docker-compose.chat.yml --env-file .env.chat up -d
+##   open http://localhost:8080 , create accounts with the registration token
+##
+## Wire your mesh to it: point bridges/matrix/config.json at
+## http://localhost:6167 (or the loomchat URL) and give each agent a Matrix
+## account. The Android app (clients/loomchat/build.sh) talks to the same
+## server: enter its public HTTPS URL at login.
+##
+## Not exposed to the internet by default: both ports bind to 127.0.0.1.
+## Put a TLS reverse proxy (or Tailscale serve) in front before you open it up.
+
+services:
+  homeserver:
+    image: matrixconduit/matrix-conduit:v0.9.0
+    restart: unless-stopped
+    environment:
+      CONDUIT_SERVER_NAME: ${LOOM_SERVER_NAME:-localhost}
+      CONDUIT_DATABASE_PATH: /var/lib/matrix-conduit/
+      CONDUIT_DATABASE_BACKEND: rocksdb
+      CONDUIT_PORT: 6167
+      CONDUIT_ADDRESS: 0.0.0.0
+      CONDUIT_ALLOW_REGISTRATION: "true"
+      CONDUIT_REGISTRATION_TOKEN: ${LOOM_REG_TOKEN:?set LOOM_REG_TOKEN in .env.chat}
+      CONDUIT_ALLOW_FEDERATION: "false"
+      CONDUIT_MAX_REQUEST_SIZE: 52428800
+      CONDUIT_CONFIG: ""
+    volumes:
+      - matrix-data:/var/lib/matrix-conduit/
+    ports:
+      - "127.0.0.1:${LOOM_HS_PORT:-6167}:6167"
+
+  loomchat:
+    build:
+      context: .
+      dockerfile: docker/loomchat/Dockerfile
+    restart: unless-stopped
+    depends_on: [homeserver]
+    ports:
+      - "127.0.0.1:${LOOM_CHAT_PORT:-8080}:8080"
+
+volumes:
+  matrix-data:

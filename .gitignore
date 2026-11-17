@@ -45,3 +45,8 @@ logs/
 # Patterns for the personal-data guard: specific to the local installation.
 # Versioning them would publish the very roster the guard exists to protect.
 tools/.personal-data-patterns
+
+# LoomChat
+clients/loomchat/keys/
+clients/loomchat/build/
+.env.chat

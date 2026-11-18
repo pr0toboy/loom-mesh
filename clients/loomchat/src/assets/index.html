@@ -5,7 +5,8 @@
 <style>
 :root{--bg:#0f1115;--card:#181b22;--ink:#e8eaf0;--mute:#9aa1ad;--acc:#7c9cff;--me:#3b5bdb;--ag:#262a33;--ok:#40c057;--wait:#fab005;--off:#5c636e;--line:#1e222a}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,sans-serif}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,sans-serif;-webkit-user-select:none;user-select:none}
+.b .body{-webkit-user-select:text;user-select:text}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
 .num{font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums}
 .view{display:none;height:100%;flex-direction:column}.view.on{display:flex}
@@ -71,6 +72,7 @@ button.tag{border:0;font-family:inherit;cursor:pointer;line-height:1.4}
 #vChat .acts{gap:4px;padding:6px 8px 0}#vChat .acts button{flex:1 1 0;min-width:0;flex-direction:column;gap:2px;padding:4px 0;min-height:48px;font-size:12px;border-radius:12px}
 .nolapi #bTerm,.nolapi #quota,.nolapi #cTag,.nolapi .acts button[data-t^="!cmd"]{display:none!important}
 [hidden]{display:none!important}
+.zv{position:fixed;inset:0;background:#000;z-index:60;overflow:hidden;touch-action:none}.zv[hidden]{display:none}.zv img{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;transform-origin:0 0}.zv button{position:absolute;top:calc(10px + env(safe-area-inset-top));right:10px;width:44px;height:44px;border-radius:50%;border:0;background:rgba(40,40,40,.8);color:#fff;font-size:22px;z-index:1}
 </style></head><body>
 
 <section id="vLogin" class="view">
@@ -302,7 +304,7 @@ function renderChat(){
     if(day!==prevDay){const t=document.createElement('div');t.className='ts';t.textContent=day===new Date().toDateString()?'Today':new Date(ev.origin_server_ts).toLocaleDateString();box.appendChild(t);prevDay=day;}
     const c=ev.content||{},d=document.createElement('div');d.className='b '+(ev.sender===S.user?'me':'ag');
     if(c.msgtype==='m.file'||c.msgtype==='m.video'||c.msgtype==='m.audio'){const a=document.createElement('button');a.className='more';a.textContent='Download: '+(c.body||'file');a.style.color='inherit';a.onclick=()=>downloadFile(c);d.appendChild(a);}
-    else if(c.msgtype==='m.image'){d.classList.add('img');const i=new Image();i.alt=c.body||'image';d.appendChild(i);i.onload=()=>{if(wasBottom)box.scrollTop=1e9;};media(c.url).then(u=>{if(u)i.src=u;});}
+    else if(c.msgtype==='m.image'){d.classList.add('img');const i=new Image();i.alt=c.body||'image';d.appendChild(i);i.onload=()=>{if(wasBottom)box.scrollTop=1e9;};i.onclick=()=>zoomImg(i.src);media(c.url).then(u=>{if(u)i.src=u;});}
     else{
       const body=document.createElement('div');body.className='body';body.innerHTML=linkify(c.body||'');d.appendChild(body);
       if(ev.sender!==S.user&&window.LoomNative){const L=document.createElement('button');L.className='listen'+(((c.body||'').length>280)?' keep':'');if(window._speaking===ev.event_id){L.dataset.on='1';}L.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4zM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg>Listen';if(L.dataset.on)L.lastChild.textContent='Stop';L.onclick=()=>{if(L.dataset.on){window.LoomNative.stopSpeaking();window._speaking=null;L.dataset.on='';L.lastChild.textContent='Listen';}else{window.LoomNative.speak(c.body||'');window._speaking=ev.event_id;L.dataset.on='1';L.lastChild.textContent='Stop';}};d.appendChild(L);}
@@ -433,8 +435,9 @@ let termBusy=false;
 async function termTick(){const a=AG[S.cur];if(!a||termBusy)return;termBusy=true;try{const j=await lapi('/api/term/'+a.agent);const t=$('term');const atB=t.scrollHeight-t.scrollTop-t.clientHeight<40;t.innerHTML='<div id="tIn">'+ansiHtml((j.text||'').replace(/\u23f5/g,'›').replace(/[\u23f8\u23f9\u23fa]/g,'■'))+'</div>';
       // Scale the whole block (transform is not affected by Android's minimum font size).
       const tin=$('tIn'),cs=getComputedStyle(t),inner=t.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight);
-      t.style.fontSize='11px';t.style.whiteSpace='pre';tin.style.cssText='display:inline-block;transform-origin:0 0';
-      const w=tin.scrollWidth,sc=w>inner?inner/w:1;tin.style.transform='scale('+sc+')';tin.style.marginBottom=(-tin.offsetHeight*(1-sc))+'px';tin.style.marginRight=(-w*(1-sc))+'px';
+      t.style.fontSize='11px';t.style.whiteSpace='pre';tin.style.cssText='display:inline-block';
+      // Shrink the font itself (not a transform) so the scroll area matches the text: no empty space under the last line.
+      const w=tin.scrollWidth,sc=w>inner?inner/w:1;if(sc<1)t.style.fontSize=(11*sc).toFixed(2)+'px';
       if(atB)t.scrollTop=1e9;$('tLive').textContent='live';}catch(e){$('tLive').textContent='offline';}finally{termBusy=false;}}
 $('bTerm').onclick=()=>{const R=S.rooms[S.cur];$('tName').textContent=roomName(R)+' · terminal';show('vTerm');$('term').textContent='Loading…';termTick().then(()=>{$('term').scrollTop=1e9;});termTimer=setInterval(termTick,1000);};
 function closeTerm(){clearInterval(termTimer);termTimer=null;show('vChat');}
@@ -482,4 +485,24 @@ async function deliverShare(roomId){
 }
 function start(){show('vList');syncLoop();loomPoll();takeShare();try{const pr=window.LoomNative&&window.LoomNative.takePendingRoom();if(pr)window.loomOpen(pr);}catch(e){}}
 if(S.token)start();else show('vLogin');
-</script></body></html>
+</script><div class="zv" id="zv" hidden><button id="zvX" aria-label="Close">✕</button><img id="zvI" alt=""></div>
+<script>
+// Full-screen image viewer: tap an image to open, pinch to zoom, drag to pan, double-tap to zoom in/out.
+(function(){const v=document.getElementById('zv'),im=document.getElementById('zvI');let z=1,x=0,y=0,pts=new Map(),st=null,lastTap=0;
+const ap=()=>{im.style.transform='translate('+x+'px,'+y+'px) scale('+z+')';};
+const clamp=()=>{if(z<=1){z=1;x=0;y=0;}else{const W=v.clientWidth,H=v.clientHeight;x=Math.min(0,Math.max(W-W*z,x));y=Math.min(0,Math.max(H-H*z,y));}};
+window.zoomImg=src=>{if(!src)return;im.src=src;z=1;x=0;y=0;ap();v.hidden=false;};
+const close=()=>{if(!v.hidden){v.hidden=true;im.src='';}};
+document.getElementById('zvX').onclick=close;
+// Android back button closes the viewer first (MainActivity calls window.loomBack).
+const prevBack=window.loomBack;window.loomBack=()=>{if(!v.hidden){close();return true;}return prevBack?prevBack():false;};
+v.addEventListener('pointerdown',e=>{if(e.target.id==='zvX')return;v.setPointerCapture(e.pointerId);pts.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(pts.size===2){const[a,b]=[...pts.values()];st={d:Math.hypot(a.x-b.x,a.y-b.y),z,x,y,cx:(a.x+b.x)/2,cy:(a.y+b.y)/2};}
+  else if(pts.size===1){const t=Date.now();if(t-lastTap<300){const k=z>1?1:2.5;x=e.clientX-(e.clientX-x)*k/z;y=e.clientY-(e.clientY-y)*k/z;z=k;clamp();ap();lastTap=0;}else lastTap=t;st={px:e.clientX,py:e.clientY,x,y};}});
+v.addEventListener('pointermove',e=>{if(!pts.has(e.pointerId))return;pts.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(pts.size===2&&st&&st.d){const[a,b]=[...pts.values()];const k=Math.min(6,Math.max(1,st.z*Math.hypot(a.x-b.x,a.y-b.y)/st.d));x=st.cx-(st.cx-st.x)*k/st.z;y=st.cy-(st.cy-st.y)*k/st.z;z=k;clamp();ap();}
+  else if(pts.size===1&&st&&st.px!==undefined&&z>1){x=st.x+e.clientX-st.px;y=st.y+e.clientY-st.py;clamp();ap();}});
+const up=e=>{pts.delete(e.pointerId);if(pts.size===1){const p=[...pts.values()][0];st={px:p.x,py:p.y,x,y};}else if(!pts.size)st=null;};
+v.addEventListener('pointerup',up);v.addEventListener('pointercancel',up);})();
+</script>
+</body></html>

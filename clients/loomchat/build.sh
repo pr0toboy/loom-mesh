@@ -5,8 +5,8 @@
 set -euo pipefail
 umask 077   # the signing key and its password must not be readable by other users
 ICI=$(cd "$(dirname "$0")" && pwd)
-VERSION_CODE=1
-VERSION_NAME=0.1.0
+VERSION_CODE=2
+VERSION_NAME=0.1.1
 SDK="${ANDROID_SDK:-$HOME/android-sdk}"
 export PATH="$PATH:$SDK/build-tools/35.0.0"   # system aapt2/zipalign win if present (ARM hosts)
 JAR="$SDK/platforms/android-34/android.jar"
